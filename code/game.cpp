@@ -344,13 +344,13 @@ void draw_bitmap_inlined(Bitmap screen, Rect2 rect, f32 angle, Bitmap bmp) {
         __m256 u_floored = _mm256_floor_ps(u);
         __m256 v_floored = _mm256_floor_ps(v);
 
-        __m256 u_fract = _mm256_min_ps(_mm256_max_ps(zero_8x, _mm256_sub_ps(u, u_floored)), one_8x);
-        __m256 v_fract = _mm256_min_ps(_mm256_max_ps(zero_8x, _mm256_sub_ps(u, v_floored)), one_8x);
+        __m256 u_fract = _mm256_min_ps(_mm256_max_ps(zero_8x, _mm256_mul_ps(_mm256_sub_ps(u, u_floored), pixel_scale_8x.x)), one_8x);
+        __m256 v_fract = _mm256_min_ps(_mm256_max_ps(zero_8x, _mm256_mul_ps(_mm256_sub_ps(v, v_floored), pixel_scale_8x.y)), one_8x);
 
         __m256i u_i32 = _mm256_cvtps_epi32(u_floored);
         __m256i v_i32 = _mm256_cvtps_epi32(v_floored);
 
-        __m256i offset = _mm256_add_epi32(_mm256_mul_epi32(v_i32, pitch_8x), u_i32);
+        __m256i offset = _mm256_add_epi32(_mm256_mullo_epi32(v_i32, pitch_8x), u_i32);
         __m256i a = _mm256_i32gather_epi32((int *)bmp.data, offset, sizeof(Pixel));
         __m256i b = _mm256_i32gather_epi32((int *)(bmp.data + 1), offset, sizeof(Pixel));
         __m256i c = _mm256_i32gather_epi32((int *)(bmp.data + bmp.pitch), offset, sizeof(Pixel));
@@ -403,7 +403,6 @@ void draw_bitmap_inlined(Bitmap screen, Rect2 rect, f32 angle, Bitmap bmp) {
         pixel.r = _mm256_cvtepi32_ps(_mm256_and_si256(_mm256_srli_epi32(pixel_u32, 16), mask_ff));
         pixel.g = _mm256_cvtepi32_ps(_mm256_and_si256(_mm256_srli_epi32(pixel_u32, 8), mask_ff));
         pixel.b = _mm256_cvtepi32_ps(_mm256_and_si256(pixel_u32, mask_ff));
-
 
         __m256 one_minus_texel_alpha = _mm256_sub_ps(one_8x, _mm256_mul_ps(texel.a, inv_255));
         V3_8x result;
@@ -511,7 +510,7 @@ void game_update(Bitmap screen) {
 
 
   static f32 t = 0;
-  // t += 0.001f;
+  t += 0.001f;
   f32 scale = (sinf(t) + 1)*10 + 10;
   memset(screen.data, (i32)0xFF333333, (size_t)(screen.height*screen.pitch*(i32)sizeof(Pixel)));
 
