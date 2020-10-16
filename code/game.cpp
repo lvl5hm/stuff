@@ -1,6 +1,28 @@
 #include "lvl5_types.h"
 #include <memory.h>
 
+extern "C" void OutputDebugStringA(const char *);
+
+struct Timed_Block {
+  u64 m_stamp;
+  u64 m_count;
+
+  Timed_Block(u64 count = 1) {
+    m_stamp = __rdtsc();
+    m_count = count;
+  }
+
+  ~Timed_Block() {
+    f64 time_per_count = (f64)(__rdtsc() - m_stamp)/(f64)m_count;
+
+    char buffer[64];
+    sprintf_s(buffer, array_count(buffer), "%0.02f\n", time_per_count);
+    OutputDebugStringA(buffer);
+  }
+};
+
+#define TIMED_BLOCK(name, count) Timed_Block __##name(count)
+
 union Pixel {
   u32 rgba;
   struct {
@@ -122,15 +144,11 @@ struct Bilinear_Sample_8x {
   V4_8x a, b, c, d;
 };
 Bilinear_Sample_8x get_bilinear_sample(Bitmap bmp, V2i_8x coords) {
-  i32_8x a, b, c, d;
-
-  for (u32 i = 0; i < 8; i++) {
-    Pixel *texel_ptr = bmp.data + coords.y.e[i]*bmp.pitch + coords.x.e[i];
-    a.e[i] = (i32)(*texel_ptr).rgba;
-    b.e[i] = (i32)(*(texel_ptr + 1)).rgba;
-    c.e[i] = (i32)(*(texel_ptr + bmp.pitch)).rgba;
-    d.e[i] = (i32)(*(texel_ptr + bmp.pitch + 1)).rgba;
-  }
+  i32_8x offset = coords.y*bmp.pitch + coords.x;
+  i32_8x a = {_mm256_i32gather_epi32((int *)bmp.data, offset.full, sizeof(Pixel))};
+  i32_8x b = {_mm256_i32gather_epi32((int *)(bmp.data + 1), offset.full, sizeof(Pixel))};
+  i32_8x c = {_mm256_i32gather_epi32((int *)(bmp.data + bmp.pitch), offset.full, sizeof(Pixel))};
+  i32_8x d = {_mm256_i32gather_epi32((int *)(bmp.data + bmp.pitch + 1), offset.full, sizeof(Pixel))};
 
   Bilinear_Sample_8x result;
   result.a = pixel_u32_to_v4_8x(a);
@@ -207,19 +225,22 @@ void draw_bitmap_simd(Bitmap screen, Rect2 rect, f32 angle, Bitmap bmp) {
   V2_8x texture_size_8x = set8(texture_size);
   V2_8x pixel_scale_8x = set8(pixel_scale);
   V2_8x origin_8x = set8(origin);
+
+  f32_8x pixel_x_offsets = {0, 1, 2, 3, 4, 5, 6, 7};
+
+  V2_8x texture_size_with_apron = texture_size_8x + 2/pixel_scale_8x;
   
   if (has_area(paint_rect)) {
+    TIMED_BLOCK(draw_pixel_avx, (u64)get_area(paint_rect));
+
     for (i32 y = paint_rect.min.y; y < paint_rect.max.y; y++) {
       for (i32 x = paint_rect.min.x; x < paint_rect.max.x; x += 8) {
-        f32 x_float = (f32)x;
-        f32 y_float = (f32)y;
-        V2_8x d = V2_8x{
-          .x = {x_float, x_float+1, x_float+2, x_float+3, x_float+4, x_float+5, x_float+6, x_float+7},
-          .y = set8(y_float),
-        } - origin_8x;
+        f32_8x x_float = set8((f32)x);
+        f32_8x y_float = set8((f32)y);
+        V2_8x d = V2_8x{x_float + pixel_x_offsets, y_float} - origin_8x;
 
         V2_8x uv01 = V2_8x{dot(d, x_axis_8x), dot(d, y_axis_8x)}*inverse_axis_length_sqr_8x;
-        V2_8x uv = uv01*(texture_size_8x + 2/pixel_scale_8x);
+        V2_8x uv = uv01*texture_size_with_apron;
 
         V2_8x floored_uv = floor(uv);
         V2_8x fract_uv = clamp01((uv - floored_uv)*pixel_scale_8x);
@@ -227,16 +248,15 @@ void draw_bitmap_simd(Bitmap screen, Rect2 rect, f32 angle, Bitmap bmp) {
         Bilinear_Sample_8x sample = get_bilinear_sample(bmp, v2i_8x(floored_uv));
         V4_8x texel = bilinear_blend(sample, fract_uv);
 
-        i32_8x pixel_u32 = {_mm256_maskload_epi32((const int *)(screen.data + y*screen.pitch + x), set8i((i32)0xFFFFFFFF).full)};
+        __m256i *pixel_ptr = (__m256i *)(screen.data + y*screen.pitch + x);
+        i32_8x pixel_u32 = {_mm256_load_si256(pixel_ptr)};
         V4_8x pixel = pixel_u32_to_v4_8x(pixel_u32);
 
         V3_8x result_rgb = texel.rgb + pixel.rgb*(1 - texel.a/255.0f);
-
         i32_8x result = pixel_v4_to_u32_8x(v4_8x(result_rgb, set8(255)));
 
         i32_8x write_mask = {(__m256i)((uv01.x >= 0) & (uv01.x < 1) & (uv01.y >= 0) & (uv01.y < 1))};
-        i32_8x masked_out = (result & write_mask) | i32_8x{_mm256_andnot_si256(write_mask.full, pixel_u32.full)};
-        _mm256_store_si256((__m256i *)(screen.data + y*screen.pitch + x), masked_out.full);
+        _mm256_maskstore_epi32((int *)pixel_ptr, write_mask.full, result.full);
       }
     }
   }
@@ -275,6 +295,8 @@ void draw_bitmap(Bitmap screen, Rect2 rect, f32 angle, Bitmap bmp) {
   V2 inverse_axis_length_sqr = 1/sqr(bitmap_rect_size);
   
   if (has_area(paint_rect)) {
+    TIMED_BLOCK(draw_pixel_slow, (u64)get_area(paint_rect));
+
     for (i32 y = paint_rect.min.y; y < paint_rect.max.y; y++) {
       for (i32 x = paint_rect.min.x; x < paint_rect.max.x; x++) {
         V2 d = v2(x, y) - origin;
@@ -282,11 +304,11 @@ void draw_bitmap(Bitmap screen, Rect2 rect, f32 angle, Bitmap bmp) {
 
         if (uv01.x >= 0 && uv01.y >= 0 && uv01.x < 1 && uv01.y < 1) {
           V2 uv = uv01*(texture_size + 2/pixel_scale);
-          V2 pixel_coords = floor(uv);
-          pixel_coords += clamp01(fract(uv)*pixel_scale);
+          V2 uv_floored = floor(uv);
+          V2 uv_fract = clamp01((uv - uv_floored)*pixel_scale);
 
-          Bilinear_Sample sample = get_bilinear_sample(bmp, v2i(floor(pixel_coords)));
-          Pixel mixed_sample = bilinear_blend(sample, fract(pixel_coords));
+          Bilinear_Sample sample = get_bilinear_sample(bmp, v2i(uv_floored));
+          Pixel mixed_sample = bilinear_blend(sample, uv_fract);
 
           Pixel pixel = screen.data[y*screen.pitch + x];
           f32 alpha = (f32)mixed_sample.a/255.0f;
@@ -309,6 +331,18 @@ void game_update(Bitmap screen) {
   if (!loaded) {
     loaded = true;
     test_bmp = win32_read_bmp("test.bmp");
+
+    {
+      // TIMED_BLOCK(haha, 1);
+
+      // #define TEST_SIZE 10000
+      // i32 *foo = (i32 *)memalloc(sizeof(i32)*TEST_SIZE*TEST_SIZE);
+      // for (i32 y = 0; y < TEST_SIZE; y++) {
+      //   for (i32 x = 0; x < TEST_SIZE; x++) {
+      //     foo[y*TEST_SIZE + x] = 69;
+      //   }
+      // }
+    }
   }
 
 
@@ -316,6 +350,7 @@ void game_update(Bitmap screen) {
   t += 0.001f;
   f32 scale = (sinf(t) + 1)*10 + 10;
   memset(screen.data, (i32)0xFF333333, (size_t)(screen.height*screen.pitch*(i32)sizeof(Pixel)));
+
   draw_bitmap_simd(screen, rect2_center_size(v2(screen.width, screen.height)*0.5f, v2(test_bmp.width*2, test_bmp.height)*scale), t*10, test_bmp);
 
 

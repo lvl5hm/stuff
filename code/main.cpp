@@ -219,9 +219,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE prev_instance, PWSTR command_l
     #define get_frame_time() (win32_get_time() - prev_time)
     f64 frame_time = get_frame_time();
 
-    char buffer[256];
-    sprintf_s(buffer, array_count(buffer), "ms: %0.2f", frame_time*1000);
-    OutputDebugStringA(buffer);
+    // char buffer[256];
+    // sprintf_s(buffer, array_count(buffer), "ms: %0.2f", frame_time*1000);
+    // OutputDebugStringA(buffer);
 
     f64 seconds_left = target_time - frame_time;
     if (seconds_left > 0) {

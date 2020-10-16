@@ -151,6 +151,12 @@ Rect2 intersect(Rect2 a, Rect2 b) {
   return result;
 }
 
+f32 get_area(Rect2 rect) {
+  V2 size = get_size(rect);
+  f32 result = size.x*size.y;
+  return result;
+}
+
 bool has_area(Rect2 rect) {
   V2 size = get_size(rect);
   bool result = size.x > 0 && size.y > 0;
@@ -228,6 +234,12 @@ V2i get_size(Rect2i a) {
   return result;
 }
 
+i32 get_area(Rect2i rect) {
+  V2i size = get_size(rect);
+  i32 result = size.x*size.y;
+  return result;
+}
+
 bool has_area(Rect2i rect) {
   V2i size = get_size(rect);
   bool result = size.x > 0 && size.y > 0;
@@ -279,7 +291,7 @@ T sqr(T a) {
 typedef __m256 f32_8x;
 
 f32_8x set8(f32 a) {
-  f32_8x result = {a, a, a, a, a, a, a, a};
+  f32_8x result = _mm256_set1_ps(a);
   return result;
 }
 
@@ -370,7 +382,17 @@ union i32_8x {
 };
 
 i32_8x set8i(i32 v) {
-  i32_8x result = {.e = {v, v, v, v, v, v, v, v}};
+  i32_8x result = {_mm256_set1_epi32(v)};
+  return result;
+}
+
+i32_8x operator+(i32_8x a, i32_8x b) {
+  i32_8x result = {_mm256_add_epi32(a.full, b.full)};
+  return result;
+}
+
+i32_8x operator*(i32_8x a, i32 b) {
+  i32_8x result = {_mm256_mullo_epi32(a.full, set8i(b).full)};
   return result;
 }
 
