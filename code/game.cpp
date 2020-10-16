@@ -3,6 +3,9 @@
 
 extern "C" void OutputDebugStringA(const char *);
 
+globalvar f64 foo_total = 0;
+globalvar f64 foo_count = 0;
+
 struct Timed_Block {
   u64 m_stamp;
   u64 m_count;
@@ -14,9 +17,11 @@ struct Timed_Block {
 
   ~Timed_Block() {
     f64 time_per_count = (f64)(__rdtsc() - m_stamp)/(f64)m_count;
+    foo_total += time_per_count;
+    foo_count++;
 
     char buffer[64];
-    sprintf_s(buffer, array_count(buffer), "%0.02f\n", time_per_count);
+    sprintf_s(buffer, array_count(buffer), "%0.02f\n", foo_total/foo_count);
     OutputDebugStringA(buffer);
   }
 };
@@ -210,8 +215,6 @@ void draw_bitmap_simd(Bitmap screen, Rect2 rect, f32 angle, Bitmap bmp) {
   if (paint_rect.max.x & 7) {
     paint_rect.max.x = (paint_rect.max.x & (~7)) + 8;
   }
-  V2i paint_size = get_size(paint_rect);
-
 
   V2 texture_size = v2(bmp.width, bmp.height);
   V2 pixel_scale = rect_size/texture_size;
@@ -257,6 +260,167 @@ void draw_bitmap_simd(Bitmap screen, Rect2 rect, f32 angle, Bitmap bmp) {
 
         i32_8x write_mask = {(__m256i)((uv01.x >= 0) & (uv01.x < 1) & (uv01.y >= 0) & (uv01.y < 1))};
         _mm256_maskstore_epi32((int *)pixel_ptr, write_mask.full, result.full);
+      }
+    }
+  }
+}
+
+void draw_bitmap_inlined(Bitmap screen, Rect2 rect, f32 angle, Bitmap bmp) {
+  Rect2i screen_rect = {{0, 0}, {screen.width, screen.height}};
+
+  Rect2 bitmap_rect = add_radius(rect, {1, 1});
+  V2 bitmap_rect_size = get_size(bitmap_rect);
+
+  V2 x_axis = V2{cosf(angle), -sinf(angle)}*bitmap_rect_size.x;
+  V2 y_axis = V2{sinf(angle), cosf(angle)}*bitmap_rect_size.y;
+  V2 origin = get_center(bitmap_rect) - x_axis*0.5f - y_axis*0.5f;
+
+  V2 vertices[] = {origin, origin + x_axis, origin + y_axis, origin + x_axis + y_axis};
+
+  Rect2 drawn_rect = inverted_infinity_rect();
+  for (u32 vertex_index = 0; vertex_index < array_count(vertices); vertex_index++) {
+    V2 vertex = vertices[vertex_index];
+
+    drawn_rect.min.x = min(drawn_rect.min.x, vertex.x);
+    drawn_rect.min.y = min(drawn_rect.min.y, vertex.y);
+    drawn_rect.max.x = max(drawn_rect.max.x, vertex.x);
+    drawn_rect.max.y = max(drawn_rect.max.y, vertex.y);
+  }
+
+  Rect2i paint_rect = intersect(screen_rect, rect2i(drawn_rect));
+  V2 rect_size = get_size(drawn_rect);
+
+  if (paint_rect.min.x & 7) {
+    paint_rect.min.x = paint_rect.min.x & (~7);
+  }
+
+  if (paint_rect.max.x & 7) {
+    paint_rect.max.x = (paint_rect.max.x & (~7)) + 8;
+  }
+
+  V2 texture_size = v2(bmp.width, bmp.height);
+  V2 pixel_scale = rect_size/texture_size;
+
+  V2 inverse_axis_length_sqr = 1/sqr(bitmap_rect_size);
+
+  V2_8x x_axis_8x = set8(x_axis);
+  V2_8x y_axis_8x = set8(y_axis);
+  V2_8x inverse_axis_length_sqr_8x = set8(inverse_axis_length_sqr);
+
+  V2_8x texture_size_8x = set8(texture_size);
+  V2_8x pixel_scale_8x = set8(pixel_scale);
+  V2_8x origin_8x = set8(origin);
+
+  f32_8x pixel_x_offsets = {0, 1, 2, 3, 4, 5, 6, 7};
+
+  V2_8x texture_size_with_apron = texture_size_8x + 2/pixel_scale_8x;
+
+  __m256 zero_8x = set8(0);
+  __m256 one_8x = set8(1);
+  __m256i pitch_8x = _mm256_set1_epi32(bmp.pitch);
+  __m256 mask_ff = _mm256_set1_epi32(0xFF);
+  __m256 inv_255 = set8(1.0f/255.0f);
+  
+  if (has_area(paint_rect)) {
+    TIMED_BLOCK(draw_pixel_avx, (u64)get_area(paint_rect));
+
+    for (i32 y = paint_rect.min.y; y < paint_rect.max.y; y++) {
+      for (i32 x = paint_rect.min.x; x < paint_rect.max.x; x += 8) {
+        __m256 x_float = _mm256_set1_ps((f32)x);
+        __m256 y_float = _mm256_set1_ps((f32)y);
+
+        __m256 d_x = _mm256_sub_ps(_mm256_add_ps(x_float, pixel_x_offsets), origin_8x.x);
+        __m256 d_y = _mm256_sub_ps(y_float, origin_8x.y);
+
+        __m256 dot_x = _mm256_add_ps(_mm256_mul_ps(d_x, x_axis_8x.x), _mm256_mul_ps(d_y, x_axis_8x.y));
+        __m256 dot_y = _mm256_add_ps(_mm256_mul_ps(d_x, y_axis_8x.x), _mm256_mul_ps(d_y, y_axis_8x.y));
+
+        __m256 u01 = _mm256_mul_ps(dot_x, inverse_axis_length_sqr_8x.x);
+        __m256 v01 = _mm256_mul_ps(dot_y, inverse_axis_length_sqr_8x.y);
+
+        __m256 u = _mm256_mul_ps(u01, texture_size_with_apron.x);
+        __m256 v = _mm256_mul_ps(v01, texture_size_with_apron.y);
+
+        __m256 u_floored = _mm256_floor_ps(u);
+        __m256 v_floored = _mm256_floor_ps(v);
+
+        __m256 u_fract = _mm256_min_ps(_mm256_max_ps(zero_8x, _mm256_sub_ps(u, u_floored)), one_8x);
+        __m256 v_fract = _mm256_min_ps(_mm256_max_ps(zero_8x, _mm256_sub_ps(u, v_floored)), one_8x);
+
+        __m256i u_i32 = _mm256_cvtps_epi32(u_floored);
+        __m256i v_i32 = _mm256_cvtps_epi32(v_floored);
+
+        __m256i offset = _mm256_add_epi32(_mm256_mul_epi32(v_i32, pitch_8x), u_i32);
+        __m256i a = _mm256_i32gather_epi32((int *)bmp.data, offset, sizeof(Pixel));
+        __m256i b = _mm256_i32gather_epi32((int *)(bmp.data + 1), offset, sizeof(Pixel));
+        __m256i c = _mm256_i32gather_epi32((int *)(bmp.data + bmp.pitch), offset, sizeof(Pixel));
+        __m256i d = _mm256_i32gather_epi32((int *)(bmp.data + bmp.pitch + 1), offset, sizeof(Pixel));
+
+        Bilinear_Sample_8x sample;
+        sample.a.a = _mm256_cvtepi32_ps(_mm256_srli_epi32(a, 24));
+        sample.a.r = _mm256_cvtepi32_ps(_mm256_and_si256(_mm256_srli_epi32(a, 16), mask_ff));
+        sample.a.g = _mm256_cvtepi32_ps(_mm256_and_si256(_mm256_srli_epi32(a, 8), mask_ff));
+        sample.a.b = _mm256_cvtepi32_ps(_mm256_and_si256(a, mask_ff));
+        
+        sample.b.a = _mm256_cvtepi32_ps(_mm256_srli_epi32(b, 24));
+        sample.b.r = _mm256_cvtepi32_ps(_mm256_and_si256(_mm256_srli_epi32(b, 16), mask_ff));
+        sample.b.g = _mm256_cvtepi32_ps(_mm256_and_si256(_mm256_srli_epi32(b, 8), mask_ff));
+        sample.b.b = _mm256_cvtepi32_ps(_mm256_and_si256(b, mask_ff));
+
+        sample.c.a = _mm256_cvtepi32_ps(_mm256_srli_epi32(c, 24));
+        sample.c.r = _mm256_cvtepi32_ps(_mm256_and_si256(_mm256_srli_epi32(c, 16), mask_ff));
+        sample.c.g = _mm256_cvtepi32_ps(_mm256_and_si256(_mm256_srli_epi32(c, 8), mask_ff));
+        sample.c.b = _mm256_cvtepi32_ps(_mm256_and_si256(c, mask_ff));
+
+        sample.d.a = _mm256_cvtepi32_ps(_mm256_srli_epi32(d, 24));
+        sample.d.r = _mm256_cvtepi32_ps(_mm256_and_si256(_mm256_srli_epi32(d, 16), mask_ff));
+        sample.d.g = _mm256_cvtepi32_ps(_mm256_and_si256(_mm256_srli_epi32(d, 8), mask_ff));
+        sample.d.b = _mm256_cvtepi32_ps(_mm256_and_si256(d, mask_ff));
+
+
+        __m256 one_minus_u_fract = _mm256_sub_ps(one_8x, u_fract);
+        __m256 one_minus_v_fract = _mm256_sub_ps(one_8x, v_fract);
+        V4_8x ab, cd, texel;
+        ab.r = _mm256_add_ps(_mm256_mul_ps(one_minus_u_fract, sample.a.r), _mm256_mul_ps(u_fract, sample.b.r));
+        ab.g = _mm256_add_ps(_mm256_mul_ps(one_minus_u_fract, sample.a.g), _mm256_mul_ps(u_fract, sample.b.g));
+        ab.b = _mm256_add_ps(_mm256_mul_ps(one_minus_u_fract, sample.a.b), _mm256_mul_ps(u_fract, sample.b.b));
+        ab.a = _mm256_add_ps(_mm256_mul_ps(one_minus_u_fract, sample.a.a), _mm256_mul_ps(u_fract, sample.b.a));
+
+        cd.r = _mm256_add_ps(_mm256_mul_ps(one_minus_u_fract, sample.c.r), _mm256_mul_ps(u_fract, sample.d.r));
+        cd.g = _mm256_add_ps(_mm256_mul_ps(one_minus_u_fract, sample.c.g), _mm256_mul_ps(u_fract, sample.d.g));
+        cd.b = _mm256_add_ps(_mm256_mul_ps(one_minus_u_fract, sample.c.b), _mm256_mul_ps(u_fract, sample.d.b));
+        cd.a = _mm256_add_ps(_mm256_mul_ps(one_minus_u_fract, sample.c.a), _mm256_mul_ps(u_fract, sample.d.a));
+
+        texel.r = _mm256_add_ps(_mm256_mul_ps(one_minus_v_fract, ab.r), _mm256_mul_ps(v_fract, cd.r));
+        texel.g = _mm256_add_ps(_mm256_mul_ps(one_minus_v_fract, ab.g), _mm256_mul_ps(v_fract, cd.g));
+        texel.b = _mm256_add_ps(_mm256_mul_ps(one_minus_v_fract, ab.b), _mm256_mul_ps(v_fract, cd.b));
+        texel.a = _mm256_add_ps(_mm256_mul_ps(one_minus_v_fract, ab.a), _mm256_mul_ps(v_fract, cd.a));
+
+        __m256i *pixel_ptr = (__m256i *)(screen.data + y*screen.pitch + x);
+        __m256i pixel_u32 = _mm256_load_si256(pixel_ptr);
+
+        V4_8x pixel;
+        pixel.r = _mm256_cvtepi32_ps(_mm256_and_si256(_mm256_srli_epi32(pixel_u32, 16), mask_ff));
+        pixel.g = _mm256_cvtepi32_ps(_mm256_and_si256(_mm256_srli_epi32(pixel_u32, 8), mask_ff));
+        pixel.b = _mm256_cvtepi32_ps(_mm256_and_si256(pixel_u32, mask_ff));
+
+
+        __m256 one_minus_texel_alpha = _mm256_sub_ps(one_8x, _mm256_mul_ps(texel.a, inv_255));
+        V3_8x result;
+        result.r = _mm256_add_ps(texel.r, _mm256_mul_ps(pixel.r, one_minus_texel_alpha));
+        result.g = _mm256_add_ps(texel.g, _mm256_mul_ps(pixel.g, one_minus_texel_alpha));
+        result.b = _mm256_add_ps(texel.b, _mm256_mul_ps(pixel.b, one_minus_texel_alpha));
+
+        __m256i result_r = _mm256_slli_epi32(_mm256_cvtps_epi32(result.r), 16);
+        __m256i result_g = _mm256_slli_epi32(_mm256_cvtps_epi32(result.g), 8);
+        __m256i result_b = _mm256_cvtps_epi32(result.b);
+        __m256i result_u32 = _mm256_or_si256(result_r, _mm256_or_si256(result_g, result_b));
+
+        __m256i write_mask = _mm256_and_si256(
+          _mm256_and_si256(_mm256_cmp_ps(zero_8x, u01, _CMP_LT_OS), _mm256_cmp_ps(zero_8x, v01, _CMP_LT_OS)),
+          _mm256_and_si256(_mm256_cmp_ps(u01, one_8x, _CMP_LT_OS), _mm256_cmp_ps(v01, one_8x, _CMP_LT_OS))
+        );
+        _mm256_maskstore_epi32((int *)pixel_ptr, write_mask, result_u32);
       }
     }
   }
@@ -347,11 +511,11 @@ void game_update(Bitmap screen) {
 
 
   static f32 t = 0;
-  t += 0.001f;
+  // t += 0.001f;
   f32 scale = (sinf(t) + 1)*10 + 10;
   memset(screen.data, (i32)0xFF333333, (size_t)(screen.height*screen.pitch*(i32)sizeof(Pixel)));
 
-  draw_bitmap_simd(screen, rect2_center_size(v2(screen.width, screen.height)*0.5f, v2(test_bmp.width*2, test_bmp.height)*scale), t*10, test_bmp);
+  draw_bitmap_inlined(screen, rect2_center_size(v2(screen.width, screen.height)*0.5f, v2(test_bmp.width*2, test_bmp.height)*scale), t*10, test_bmp);
 
 
 #if 0
