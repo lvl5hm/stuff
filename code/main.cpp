@@ -151,7 +151,89 @@ LRESULT CALLBACK WindowProc(
   return DefWindowProcA(window, message, w_param, l_param);
 }
 
-int WINAPI wWinMain(HINSTANCE instance, HINSTANCE prev_instance, PWSTR command_line, int show_command_line) {
+
+typedef void (*Worker_Fn)(void *data);
+
+struct Thread_Queue_Item {
+  Worker_Fn fn;
+  void *data;
+};
+
+#define THREAD_QUEUE_CAPACITY 64
+
+struct Thread_Queue {
+  Thread_Queue_Item items[THREAD_QUEUE_CAPACITY];
+  volatile u32 write_cursor;
+  volatile u32 read_cursor;
+};
+
+struct Thread {
+  Thread_Queue *queue;
+  u32 thread_index;
+};
+
+globalvar bool __run_threads = true;
+
+DWORD WINAPI thread_proc(void *data) {
+  Thread *thread = (Thread *)data;
+  Thread_Queue *queue = thread->queue;
+  while (__run_threads) {
+    u32 old_read_cursor = queue->read_cursor;
+    u32 old_write_cursor = queue->write_cursor;
+    if (old_read_cursor != old_write_cursor) {
+      u32 new_read_cursor = (old_read_cursor + 1) % THREAD_QUEUE_CAPACITY;
+      if (InterlockedCompareExchange(&queue->read_cursor, new_read_cursor, old_read_cursor) == old_read_cursor) {
+        Thread_Queue_Item *item = queue->items + old_read_cursor;
+        item->fn(item->data);
+      }
+    }
+  }
+
+  return 0;
+}
+
+void print_some_shit(u64 num) {
+  char buffer[128];
+  sprintf_s(buffer, 128, "%lld\n", num);
+  OutputDebugStringA(buffer);
+}
+
+void add_thread_task(Thread_Queue *queue, Worker_Fn fn, void *data) {
+  Thread_Queue_Item item = {
+    .fn = fn,
+    .data = data,
+  };
+
+  u32 old_write_cursor = queue->write_cursor;
+  queue->items[old_write_cursor] = item;
+
+  u32 new_write_cursor = (old_write_cursor + 1) % THREAD_QUEUE_CAPACITY;
+  assert(new_write_cursor != queue->read_cursor);
+  queue->write_cursor = new_write_cursor;
+}
+
+int WINAPI wWinMain(HINSTANCE instance, HINSTANCE prev_instance, PWSTR command_line, int show_command_line) {  
+  init_default_context();
+
+  u32 logical_core_count = 12;
+
+  Thread *threads = (Thread *)memalloc(sizeof(Thread)*logical_core_count);
+  Thread_Queue thread_queue = {};
+
+
+  for (u32 thread_index = 0; thread_index < logical_core_count - 1; thread_index++) {
+    Thread *thread = threads + thread_index;
+    thread->thread_index = thread_index;
+    thread->queue = &thread_queue;
+
+    u32 thread_id;
+    HANDLE thread_handle = CreateThread(nullptr, 0, thread_proc, thread, 0, &thread_id);
+  }
+
+  for (u64 i = 0; i < 30; i++) {
+    add_thread_task(&thread_queue, (Worker_Fn)print_some_shit, (void *)i);
+  }
+  
   // program start
   assert(timeBeginPeriod(1) == TIMERR_NOERROR);
   assert(QueryPerformanceFrequency(&performance_frequency));

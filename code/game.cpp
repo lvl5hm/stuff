@@ -3,6 +3,10 @@
 
 extern "C" void OutputDebugStringA(const char *);
 
+globalvar f64 foo_total = 0;
+globalvar f64 foo_count = 0;
+
+
 struct Timed_Block {
   u64 m_stamp;
   u64 m_count;
@@ -14,9 +18,11 @@ struct Timed_Block {
 
   ~Timed_Block() {
     f64 time_per_count = (f64)(__rdtsc() - m_stamp)/(f64)m_count;
+    foo_total += time_per_count;
+    foo_count++;
 
     char buffer[64];
-    sprintf_s(buffer, array_count(buffer), "%0.02f\n", time_per_count);
+    sprintf_s(buffer, array_count(buffer), "%0.02f\n", foo_total/foo_count);
     OutputDebugStringA(buffer);
   }
 };
@@ -124,18 +130,18 @@ Bilinear_Sample get_bilinear_sample(Bitmap bmp, V2i coords) {
 
 V4_8x pixel_u32_to_v4_8x(i32_8x p) {
   V4_8x result;
-  result.a = _mm256_cvtepi32_ps((p >> 24).full);
-  result.r = _mm256_cvtepi32_ps(((p >> 16) & 0xFF).full);
-  result.g = _mm256_cvtepi32_ps(((p >> 8) & 0xFF).full);
-  result.b = _mm256_cvtepi32_ps((p & 0xFF).full);
+  result.a = to_f32_8x(p >> 24);
+  result.r = to_f32_8x((p >> 16) & 0xFF);
+  result.g = to_f32_8x((p >> 8) & 0xFF);
+  result.b = to_f32_8x(p & 0xFF);
   return result;
 }
 
 i32_8x pixel_v4_to_u32_8x(V4_8x p) {
-  i32_8x a = i32_8x{_mm256_cvtps_epi32(p.a)} << 24;
-  i32_8x r = i32_8x{_mm256_cvtps_epi32(p.r)} << 16;
-  i32_8x g = i32_8x{_mm256_cvtps_epi32(p.g)} << 8;
-  i32_8x b = i32_8x{_mm256_cvtps_epi32(p.b)};
+  i32_8x a = to_i32_8x(p.a) << 24;
+  i32_8x r = to_i32_8x(p.r) << 16;
+  i32_8x g = to_i32_8x(p.g) << 8;
+  i32_8x b = to_i32_8x(p.b);
   i32_8x result = r | g | b | a;
   return result;
 }
@@ -145,10 +151,10 @@ struct Bilinear_Sample_8x {
 };
 Bilinear_Sample_8x get_bilinear_sample(Bitmap bmp, V2i_8x coords) {
   i32_8x offset = coords.y*bmp.pitch + coords.x;
-  i32_8x a = {_mm256_i32gather_epi32((int *)bmp.data, offset.full, sizeof(Pixel))};
-  i32_8x b = {_mm256_i32gather_epi32((int *)(bmp.data + 1), offset.full, sizeof(Pixel))};
-  i32_8x c = {_mm256_i32gather_epi32((int *)(bmp.data + bmp.pitch), offset.full, sizeof(Pixel))};
-  i32_8x d = {_mm256_i32gather_epi32((int *)(bmp.data + bmp.pitch + 1), offset.full, sizeof(Pixel))};
+  i32_8x a = gather_i32(bmp.data, offset);
+  i32_8x b = gather_i32(bmp.data + 1, offset);
+  i32_8x c = gather_i32(bmp.data + bmp.pitch, offset);
+  i32_8x d = gather_i32(bmp.data + bmp.pitch + 1, offset);
 
   Bilinear_Sample_8x result;
   result.a = pixel_u32_to_v4_8x(a);
@@ -178,7 +184,7 @@ V4_8x bilinear_blend(Bilinear_Sample_8x sample, V2_8x c) {
   return abcd;
 }
 
-void draw_bitmap_simd(Bitmap screen, Rect2 rect, f32 angle, Bitmap bmp) {
+void draw_bitmap_avx(Bitmap screen, Rect2 rect, f32 angle, Bitmap bmp) {
   Rect2i screen_rect = {{0, 0}, {screen.width, screen.height}};
 
   Rect2 bitmap_rect = add_radius(rect, {1, 1});
@@ -248,15 +254,15 @@ void draw_bitmap_simd(Bitmap screen, Rect2 rect, f32 angle, Bitmap bmp) {
         Bilinear_Sample_8x sample = get_bilinear_sample(bmp, v2i_8x(floored_uv));
         V4_8x texel = bilinear_blend(sample, fract_uv);
 
-        __m256i *pixel_ptr = (__m256i *)(screen.data + y*screen.pitch + x);
-        i32_8x pixel_u32 = {_mm256_load_si256(pixel_ptr)};
+        Pixel *pixel_ptr = screen.data + y*screen.pitch + x;
+        i32_8x pixel_u32 = load_i32_8x(pixel_ptr);
         V4_8x pixel = pixel_u32_to_v4_8x(pixel_u32);
 
         V3_8x result_rgb = texel.rgb + pixel.rgb*(1 - texel.a/255.0f);
         i32_8x result = pixel_v4_to_u32_8x(v4_8x(result_rgb, set8(255)));
 
-        i32_8x write_mask = {(__m256i)((uv01.x >= 0) & (uv01.x < 1) & (uv01.y >= 0) & (uv01.y < 1))};
-        _mm256_maskstore_epi32((int *)pixel_ptr, write_mask.full, result.full);
+        i32_8x write_mask = to_i32_8x((uv01.x >= 0) & (uv01.x < 1) & (uv01.y >= 0) & (uv01.y < 1));
+        mask_store_i32_8x(pixel_ptr, write_mask, result);
       }
     }
   }
@@ -351,7 +357,7 @@ void game_update(Bitmap screen) {
   f32 scale = (sinf(t) + 1)*10 + 10;
   memset(screen.data, (i32)0xFF333333, (size_t)(screen.height*screen.pitch*(i32)sizeof(Pixel)));
 
-  draw_bitmap_simd(screen, rect2_center_size(v2(screen.width, screen.height)*0.5f, v2(test_bmp.width*2, test_bmp.height)*scale), t*10, test_bmp);
+  draw_bitmap_avx(screen, rect2_center_size(v2(screen.width, screen.height)*0.5f, v2(test_bmp.width*2, test_bmp.height)*scale), t*10, test_bmp);
 
 
 #if 0

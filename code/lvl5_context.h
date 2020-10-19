@@ -52,18 +52,22 @@ void *heap_allocator(Alloc_Op op, Mem_Size size, void *allocator_data, void *old
 
 
 #define __DEFAULT_SCRATCH_CAPACITY kilobytes(40)
-globalvar Arena __global_default_scratch = {
-  .data = (byte *)_aligned_malloc(__DEFAULT_SCRATCH_CAPACITY, 16),
-  .capacity = __DEFAULT_SCRATCH_CAPACITY,
-};
-globalvar thread_local Context __global_context_stack[16] = {
-  {
+globalvar thread_local Arena __global_default_scratch;
+globalvar thread_local Context __global_context_stack[16];
+globalvar thread_local u32 __global_context_count = 0;
+
+void init_default_context() {
+  __global_default_scratch = {
+    .data = (byte *)_aligned_malloc(__DEFAULT_SCRATCH_CAPACITY, 16),
+    .capacity = __DEFAULT_SCRATCH_CAPACITY,
+  };
+
+  __global_context_stack[__global_context_count++] = {
     .allocator = heap_allocator,
     .allocator_data = nullptr,
     .scratch = &__global_default_scratch,
-  },
-};
-globalvar thread_local u32 __global_context_count = 1;
+  };
+}
 
 struct Context_Scope {
   Context_Scope() {}

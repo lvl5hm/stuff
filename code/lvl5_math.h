@@ -438,6 +438,29 @@ i32_8x operator>>(i32_8x a, i32 b) {
   return result;
 }
 
+void mask_store_i32_8x(void *ptr, i32_8x mask, i32_8x data) {
+  _mm256_maskstore_epi32((int *)ptr, mask.full, data.full);
+}
+
+i32_8x load_i32_8x(void *ptr) {
+  i32_8x result = {_mm256_load_si256((__m256i *)ptr)};
+  return result;
+}
+
+i32_8x gather_i32(void *ptr, i32_8x offset) {
+  i32_8x result = {_mm256_i32gather_epi32((int *)ptr, offset.full, sizeof(i32))};
+  return result;
+}
+
+i32_8x to_i32_8x(f32_8x a) {
+  i32_8x result = {_mm256_cvtps_epi32(a)};
+  return result;
+}
+
+f32_8x to_f32_8x(i32_8x a) {
+  f32_8x result = _mm256_cvtepi32_ps(a.full);
+  return result;
+}
 
 struct V2i_8x {
   i32_8x x, y;
