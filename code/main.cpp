@@ -3,6 +3,7 @@
 #include "game.cpp"
 
 #include "Windows.h"
+#include <intrin.h>
 
 #define TARGET_FPS 60
 
@@ -152,7 +153,6 @@ LRESULT CALLBACK WindowProc(
 }
 
 
-typedef void (*Worker_Fn)(void *data);
 
 struct Thread_Queue_Item {
   Worker_Fn fn;
@@ -165,6 +165,9 @@ struct Thread_Queue {
   Thread_Queue_Item items[THREAD_QUEUE_CAPACITY];
   volatile u32 write_cursor;
   volatile u32 read_cursor;
+  volatile u32 completion_cursor;
+  volatile u32 target_cursor;
+  HANDLE semaphore;
 };
 
 struct Thread {
@@ -174,18 +177,32 @@ struct Thread {
 
 globalvar bool __run_threads = true;
 
+bool do_thread_task(Thread_Queue *queue) {
+  bool result = true;
+
+  u32 old_read_cursor = queue->read_cursor;
+  if (old_read_cursor != queue->write_cursor) {
+    u32 old_write_cursor = queue->write_cursor;
+    u32 new_read_cursor = (old_read_cursor + 1) % THREAD_QUEUE_CAPACITY;
+    if (InterlockedCompareExchange(&queue->read_cursor, new_read_cursor, old_read_cursor) == old_read_cursor) {
+      Thread_Queue_Item *item = queue->items + old_read_cursor;
+      item->fn(item->data);
+      InterlockedIncrement(&queue->completion_cursor);
+    }
+  } else {
+    result = false;
+  }
+
+  return result;
+}
+
 DWORD WINAPI thread_proc(void *data) {
   Thread *thread = (Thread *)data;
   Thread_Queue *queue = thread->queue;
   while (__run_threads) {
-    u32 old_read_cursor = queue->read_cursor;
-    u32 old_write_cursor = queue->write_cursor;
-    if (old_read_cursor != old_write_cursor) {
-      u32 new_read_cursor = (old_read_cursor + 1) % THREAD_QUEUE_CAPACITY;
-      if (InterlockedCompareExchange(&queue->read_cursor, new_read_cursor, old_read_cursor) == old_read_cursor) {
-        Thread_Queue_Item *item = queue->items + old_read_cursor;
-        item->fn(item->data);
-      }
+    bool did_task = do_thread_task(queue);
+    if (!did_task) {
+      WaitForSingleObject(queue->semaphore, INFINITE);
     }
   }
 
@@ -205,20 +222,36 @@ void add_thread_task(Thread_Queue *queue, Worker_Fn fn, void *data) {
   };
 
   u32 old_write_cursor = queue->write_cursor;
-  queue->items[old_write_cursor] = item;
+  u32 old_read_cursor = queue->read_cursor;
 
   u32 new_write_cursor = (old_write_cursor + 1) % THREAD_QUEUE_CAPACITY;
-  assert(new_write_cursor != queue->read_cursor);
+  assert(new_write_cursor != old_read_cursor);
+
+  queue->items[old_write_cursor] = item;
+
+  _WriteBarrier();
   queue->write_cursor = new_write_cursor;
+  queue->target_cursor++;
+  ReleaseSemaphore(queue->semaphore, 1, nullptr);
+}
+
+void wait_for_all_tasks(Thread_Queue *queue) {
+  while (queue->target_cursor != queue->completion_cursor) {
+    do_thread_task(queue);
+  }
+  queue->target_cursor = 0;
+  queue->completion_cursor = 0;
 }
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE prev_instance, PWSTR command_line, int show_command_line) {  
   init_default_context();
 
-  u32 logical_core_count = 12;
+  u32 logical_core_count = 5;
 
   Thread *threads = (Thread *)memalloc(sizeof(Thread)*logical_core_count);
-  Thread_Queue thread_queue = {};
+  Thread_Queue thread_queue = {
+    .semaphore = CreateSemaphoreA(nullptr, 0, THREAD_QUEUE_CAPACITY, nullptr),
+  };
 
 
   for (u32 thread_index = 0; thread_index < logical_core_count - 1; thread_index++) {
@@ -230,9 +263,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE prev_instance, PWSTR command_l
     HANDLE thread_handle = CreateThread(nullptr, 0, thread_proc, thread, 0, &thread_id);
   }
 
-  for (u64 i = 0; i < 30; i++) {
-    add_thread_task(&thread_queue, (Worker_Fn)print_some_shit, (void *)i);
-  }
+  // for (u64 i = 0; i < 30; i++) {
+  //   add_thread_task(&thread_queue, (Worker_Fn)print_some_shit, (void *)i);
+  // }
   
   // program start
   assert(timeBeginPeriod(1) == TIMERR_NOERROR);
@@ -284,7 +317,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE prev_instance, PWSTR command_l
       }
     }
 
-    game_update(screen);
+    game_update(screen, &thread_queue);
   
     StretchDIBits(
       device_context,

@@ -3,9 +3,10 @@
 
 extern "C" void OutputDebugStringA(const char *);
 
-globalvar f64 foo_total = 0;
-globalvar f64 foo_count = 0;
-
+struct Thread_Queue;
+typedef void (*Worker_Fn)(void *data);
+void add_thread_task(Thread_Queue *, Worker_Fn, void *);
+void wait_for_all_tasks(Thread_Queue *queue);
 
 struct Timed_Block {
   u64 m_stamp;
@@ -18,11 +19,9 @@ struct Timed_Block {
 
   ~Timed_Block() {
     f64 time_per_count = (f64)(__rdtsc() - m_stamp)/(f64)m_count;
-    foo_total += time_per_count;
-    foo_count++;
 
     char buffer[64];
-    sprintf_s(buffer, array_count(buffer), "%0.02f\n", foo_total/foo_count);
+    sprintf_s(buffer, array_count(buffer), "%0.02f\n", time_per_count);
     OutputDebugStringA(buffer);
   }
 };
@@ -184,9 +183,13 @@ V4_8x bilinear_blend(Bilinear_Sample_8x sample, V2_8x c) {
   return abcd;
 }
 
-void draw_bitmap_avx(Bitmap screen, Rect2 rect, f32 angle, Bitmap bmp) {
-  Rect2i screen_rect = {{0, 0}, {screen.width, screen.height}};
-
+#if 0
+#define IACA_START
+#define IACA_END
+#else
+#include <iacaMarks.h>
+#endif
+void draw_bitmap_avx(Bitmap screen, Rect2 rect, f32 angle, Bitmap bmp, Rect2i clip_rect) {
   Rect2 bitmap_rect = add_radius(rect, {1, 1});
   V2 bitmap_rect_size = get_size(bitmap_rect);
 
@@ -206,7 +209,7 @@ void draw_bitmap_avx(Bitmap screen, Rect2 rect, f32 angle, Bitmap bmp) {
     drawn_rect.max.y = max(drawn_rect.max.y, vertex.y);
   }
 
-  Rect2i paint_rect = intersect(screen_rect, rect2i(drawn_rect));
+  Rect2i paint_rect = intersect(clip_rect, rect2i(drawn_rect));
   V2 rect_size = get_size(drawn_rect);
 
   if (paint_rect.min.x & 7) {
@@ -237,10 +240,12 @@ void draw_bitmap_avx(Bitmap screen, Rect2 rect, f32 angle, Bitmap bmp) {
   V2_8x texture_size_with_apron = texture_size_8x + 2/pixel_scale_8x;
   
   if (has_area(paint_rect)) {
-    TIMED_BLOCK(draw_pixel_avx, (u64)get_area(paint_rect));
+    // TIMED_BLOCK(draw_pixel_avx, (u64)get_area(paint_rect));
 
     for (i32 y = paint_rect.min.y; y < paint_rect.max.y; y++) {
       for (i32 x = paint_rect.min.x; x < paint_rect.max.x; x += 8) {
+        IACA_START
+
         f32_8x x_float = set8((f32)x);
         f32_8x y_float = set8((f32)y);
         V2_8x d = V2_8x{x_float + pixel_x_offsets, y_float} - origin_8x;
@@ -263,6 +268,10 @@ void draw_bitmap_avx(Bitmap screen, Rect2 rect, f32 angle, Bitmap bmp) {
 
         i32_8x write_mask = to_i32_8x((uv01.x >= 0) & (uv01.x < 1) & (uv01.y >= 0) & (uv01.y < 1));
         mask_store_i32_8x(pixel_ptr, write_mask, result);
+
+        // __writegsbyte(10, 10);
+
+        IACA_END
       }
     }
   }
@@ -301,8 +310,6 @@ void draw_bitmap(Bitmap screen, Rect2 rect, f32 angle, Bitmap bmp) {
   V2 inverse_axis_length_sqr = 1/sqr(bitmap_rect_size);
   
   if (has_area(paint_rect)) {
-    TIMED_BLOCK(draw_pixel_slow, (u64)get_area(paint_rect));
-
     for (i32 y = paint_rect.min.y; y < paint_rect.max.y; y++) {
       for (i32 x = paint_rect.min.x; x < paint_rect.max.x; x++) {
         V2 d = v2(x, y) - origin;
@@ -330,10 +337,23 @@ void draw_bitmap(Bitmap screen, Rect2 rect, f32 angle, Bitmap bmp) {
   }
 }
 
+
+struct Render_Region_Task {
+  Rect2i region;
+  Bitmap screen;
+  Rect2 rect;
+  f32 angle;
+  Bitmap bmp;
+};
+
+void do_render_region_task(Render_Region_Task *task) {
+  draw_bitmap_avx(task->screen, task->rect, task->angle, task->bmp, task->region);
+}
+
 Bitmap win32_read_bmp(char *);
 globalvar Bitmap test_bmp;
 
-void game_update(Bitmap screen) {
+void game_update(Bitmap screen, Thread_Queue *thread_queue) {
   if (!loaded) {
     loaded = true;
     test_bmp = win32_read_bmp("test.bmp");
@@ -353,12 +373,49 @@ void game_update(Bitmap screen) {
 
 
   static f32 t = 0;
-  t += 0.001f;
+  // t += 0.001f;
   f32 scale = (sinf(t) + 1)*10 + 10;
   memset(screen.data, (i32)0xFF333333, (size_t)(screen.height*screen.pitch*(i32)sizeof(Pixel)));
 
-  draw_bitmap_avx(screen, rect2_center_size(v2(screen.width, screen.height)*0.5f, v2(test_bmp.width*2, test_bmp.height)*scale), t*10, test_bmp);
+#if 1
+  {
+#define REGION_COUNT 24
+    TIMED_BLOCK(render_rect, 1);
+    Render_Region_Task tasks[REGION_COUNT];
+    for (i32 region_index = 0; region_index < REGION_COUNT; region_index += 1) {
+      V2i region_size = {screen.width, screen.height/REGION_COUNT};
+      Rect2i region = rect2i_min_size({0, region_size.y*region_index}, region_size);
+      tasks[region_index] = {
+        .region = region,
+        .screen = screen,
+        .rect = rect2_center_size(v2(screen.width, screen.height)*0.5f, v2(test_bmp.width*2, test_bmp.height)*scale),
+        .angle = t*10,
+        .bmp = test_bmp,
+      };
 
+      add_thread_task(thread_queue, (Worker_Fn)do_render_region_task, tasks + region_index);
+    }
+    wait_for_all_tasks(thread_queue);
+
+  }
+#endif
+
+#if 0
+  {
+    TIMED_BLOCK(render_rect, 1);
+    Rect2i region = rect2i_min_size({0, 0}, {screen.width, screen.height});
+    draw_bitmap_avx(screen, rect2_center_size(v2(screen.width, screen.height)*0.5f, v2(test_bmp.width*2, test_bmp.height)*scale), t*10, test_bmp, region);
+  }
+#endif
+
+#if 0
+  {
+    TIMED_BLOCK(render_rect, 1);
+    draw_bitmap(screen, rect2_center_size(v2(screen.width, screen.height)*0.5f, v2(test_bmp.width*2, test_bmp.height)*scale), t*10, test_bmp);
+  }
+#endif
+
+  int break_here = 23;
 
 #if 0
   Layout *layout = &_layout;

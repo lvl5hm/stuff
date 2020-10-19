@@ -200,6 +200,11 @@ V2i operator-(V2i a, V2i b) {
   return result;
 }
 
+V2i operator+(V2i a, V2i b) {
+  V2i result = {a.x + b.x, a.y + b.y};
+  return result;
+}
+
 V2 v2(V2i a) {
   V2 result = v2(a.x, a.y);
   return result;
@@ -218,6 +223,14 @@ Rect2 rect2(Rect2i r) {
 
 Rect2i rect2i(Rect2 r) {
   Rect2i result = {v2i(r.min), v2i(r.max)};
+  return result;
+}
+
+Rect2i rect2i_min_size(V2i min, V2i size) {
+  Rect2i result = {
+    .min = min,
+    .max = min + size,
+  };
   return result;
 }
 
@@ -281,7 +294,6 @@ T sqr(T a) {
   T result = a*a;
   return result;
 }
-
 
 
 
