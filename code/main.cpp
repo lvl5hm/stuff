@@ -263,10 +263,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE prev_instance, PWSTR command_l
     HANDLE thread_handle = CreateThread(nullptr, 0, thread_proc, thread, 0, &thread_id);
   }
 
-  // for (u64 i = 0; i < 30; i++) {
-  //   add_thread_task(&thread_queue, (Worker_Fn)print_some_shit, (void *)i);
-  // }
-  
+
   // program start
   assert(timeBeginPeriod(1) == TIMERR_NOERROR);
   assert(QueryPerformanceFrequency(&performance_frequency));

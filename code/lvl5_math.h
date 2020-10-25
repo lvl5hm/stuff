@@ -82,14 +82,12 @@ f32 len(V2 a) {
     return result;
 }
 
-V2 hadamard(V2 a, V2 b) {
-  V2 result = {a.x*b.x, a.y*b.y};
-  return result;
-}
-
 union V3 {
   struct {
     f32 x, y, z;
+  };
+  struct {
+    V2 xy;
   };
   f32 e[3];
 };
@@ -99,6 +97,59 @@ V3 v3(V2 a, f32 z) {
   return result;
 }
 
+V3 operator+(V3 a, V3 b) {
+    V3 result = {a.x + b.x, a.y + b.y, a.z + b.z};
+    return result;
+}
+V3 operator*(V3 a, f32 s) {
+    V3 result = {a.x*s, a.y*s, a.z*s};
+    return result;
+}
+
+V3 operator-(V3 a, V3 b) {
+    V3 result = a + b*-1;
+    return result;
+}
+
+V3 operator*(V3 a, V3 b) {
+  V3 result = {a.x*b.x, a.y*b.y, a.z*b.z};
+  return result;
+}
+
+V3 operator/(V3 a, V3 b) {
+  V3 result = {a.x/b.x, a.y/b.y, a.z/b.z};
+  return result;
+}
+
+V3 operator+=(V3 &a, V3 b) {
+    a = a + b;
+    return a;
+}
+
+V3 operator/(V3 a, f32 s) {
+    V3 result = a*(1/s);
+    return result;
+}
+
+V3 operator/(f32 s, V3 a) {
+  V3 result = {s/a.x, s/a.y, s/a.z};
+  return result;
+}
+
+f32 dot(V3 a, V3 b) {
+    f32 result = a.x*b.x + a.y*b.y + a.z*b.z;
+    return result;
+}
+
+f32 len_sqr(V3 a) {
+    f32 result = a.x*a.x + a.y*a.y + a.z*a.z;
+    return result;
+}
+
+f32 len(V3 a) {
+    f32 result = sqrtf(len_sqr(a));
+    return result;
+}
 
 
 union V4 {
@@ -114,6 +165,128 @@ union V4 {
   V3 xyz;
   V3 rgb;
 };
+
+f32 dot(V4 a, V4 b) {
+  f32 result = a.x*b.x + a.y*b.y + a.z*b.z + a.w*b.w;
+  return result;
+}
+
+
+union Mat4 {
+  struct {
+    f32 e00, e10, e20, e30,
+        e01, e11, e21, e31,
+        e02, e12, e22, e32,
+        e03, e13, e23, e33;
+  };
+  f32 e[16];
+};
+
+V4 get_row(Mat4 m, i32 n) {
+  V4 result = *((V4 *)&m + n);
+  return result;
+}
+V4 get_col(Mat4 m, i32 n) {
+  V4 result = {m.e[n], m.e[n + 4], m.e[n + 8], m.e[n + 12]};
+  return result;
+}
+
+Mat4 operator*(Mat4 a, Mat4 b) {
+  Mat4 result = {
+    dot(get_row(a, 0), get_col(b, 0)),
+    dot(get_row(a, 0), get_col(b, 1)),
+    dot(get_row(a, 0), get_col(b, 2)),
+    dot(get_row(a, 0), get_col(b, 3)),
+
+    dot(get_row(a, 1), get_col(b, 0)),
+    dot(get_row(a, 1), get_col(b, 1)),
+    dot(get_row(a, 1), get_col(b, 2)),
+    dot(get_row(a, 1), get_col(b, 3)),
+
+    dot(get_row(a, 2), get_col(b, 0)),
+    dot(get_row(a, 2), get_col(b, 1)),
+    dot(get_row(a, 2), get_col(b, 2)),
+    dot(get_row(a, 2), get_col(b, 3)),
+
+    dot(get_row(a, 3), get_col(b, 0)),
+    dot(get_row(a, 3), get_col(b, 1)),
+    dot(get_row(a, 3), get_col(b, 2)),
+    dot(get_row(a, 3), get_col(b, 3)),
+  };
+  return result;
+}
+
+V4 operator*(Mat4 m, V4 v) {
+  V4 result = {
+    dot(get_row(m, 0), v),
+    dot(get_row(m, 1), v),
+    dot(get_row(m, 2), v),
+    dot(get_row(m, 3), v),
+  };
+  return result;
+}
+V4 operator*(V4 v, Mat4 m) {
+  V4 result = {
+    dot(get_col(m, 0), v),
+    dot(get_col(m, 1), v),
+    dot(get_col(m, 2), v),
+    dot(get_col(m, 3), v),
+  };
+  return result;
+}
+
+
+Mat4 scale(V3 scale) {
+  Mat4 result = {
+    scale.x, 0,        0,       0,
+    0,       scale.y,  0,       0,
+    0,       0,        scale.z, 0,
+    0,       0,        0,       0,
+  };
+  return result;
+}
+
+Mat4 rotate_x(f32 angle) {
+  f32 sin = sinf(angle);
+  f32 cos = cosf(angle);
+  Mat4 result = {
+    1,   0,   0,    0,
+    0,   cos, -sin, 0,
+    0,   sin, cos,  0,
+    0,   0,   0,    1,
+  };
+  return result;
+}
+
+Mat4 rotate_y(f32 angle) {
+  f32 sin = sinf(angle);
+  f32 cos = cosf(angle);
+  Mat4 result = {
+    cos,  0,  sin, 0,
+    0,    1,  0,   0,
+    -sin, 0,  cos, 0,
+    0,    0,  0,   1,
+  };
+  return result;
+}
+
+Mat4 rotate_z(f32 angle) {
+  f32 sin = sinf(angle);
+  f32 cos = cosf(angle);
+  Mat4 result = {
+    cos, -sin, 0, 0,
+    sin, cos,  0, 0,
+    0,   0,    1, 0,
+    0,   0,    0, 1,
+  };
+  return result;
+}
+
+Mat4 rotate(V3 euler_angles) {
+  Mat4 result = rotate_x(euler_angles.x)*rotate_y(euler_angles.y)*rotate_z(euler_angles.z);
+  return result;
+}
+
 
 
 struct Rect2 {
@@ -297,6 +470,10 @@ T sqr(T a) {
 
 
 
+
+
+
+
 #include <immintrin.h>
 #include <avxintrin.h>
 
@@ -361,6 +538,16 @@ V2_8x operator-(V2_8x a, V2_8x b) {
 f32_8x dot(V2_8x a, V2_8x b) {
    f32_8x result =  _mm256_add_ps(_mm256_mul_ps(a.x, b.x), _mm256_mul_ps(a.y, b.y));
    return result;
+}
+
+f32_8x cross(V2_8x a, V2_8x b) {
+  f32_8x result = a.x*b.y - b.x*a.y;
+  return result;
+}
+
+V2_8x perp(V2_8x a) {
+  V2_8x result = {-a.y, a.x};
+  return result;
 }
 
 V2_8x floor(V2_8x a) {
@@ -459,8 +646,8 @@ i32_8x load_i32_8x(void *ptr) {
   return result;
 }
 
-i32_8x gather_i32(void *ptr, i32_8x offset) {
-  i32_8x result = {_mm256_i32gather_epi32((int *)ptr, offset.full, sizeof(i32))};
+i32_8x gather_i32(void *ptr, i32_8x offset, i32_8x mask) {
+  i32_8x result = {_mm256_mask_i32gather_epi32(set8i(0).full, (int *)ptr, offset.full, mask.full, sizeof(i32))};
   return result;
 }
 
@@ -545,6 +732,59 @@ V4_8x operator*(V4_8x a, V4_8x b) {
 
 V4_8x operator*(V4_8x a, f32_8x s) {
   V4_8x result = {a.x*s, a.y*s, a.z*s, a.w*s};
+  return result;
+}
+
+struct Mat2 {
+  f32 a, b, c, d;
+};
+
+Mat2 mat2(Mat4 m) {
+  Mat2 result = {m.e00, m.e10, m.e01, m.e11};
+  return result;
+}
+
+
+struct Mat2_8x {
+  f32_8x a, b, c, d;
+};
+
+Mat2_8x set8(Mat2 m) {
+  Mat2_8x result = {set8(m.a), set8(m.b), set8(m.c), set8(m.d)};
+  return result;
+}
+
+Mat2_8x mat2_8x_cols(V2_8x left_col, V2_8x right_col) {
+  Mat2_8x result = {left_col.x, right_col.x, left_col.y, right_col.y};
+  return result;
+}
+
+Mat2_8x operator*(Mat2_8x m, f32_8x s) {
+  Mat2_8x result = {m.a*s, m.b*s, m.c*s, m.d*s};
+  return result;
+}
+
+Mat2_8x operator*(f32_8x s, Mat2_8x m) {
+  Mat2_8x result = {m.a*s, m.b*s, m.c*s, m.d*s};
+  return result;
+}
+
+V2_8x operator*(Mat2_8x m, V2_8x v) {
+  V2_8x result = {v.x*m.a + v.y*m.b, v.x*m.c + v.y*m.d};
+  return result;
+}
+V2_8x operator*(V2_8x v, Mat2_8x m) {
+  V2_8x result = {v.x*m.a + v.y*m.c, v.x*m.b + v.y*m.d};
+  return result;
+}
+
+f32_8x det(Mat2_8x m) {
+  f32_8x result = m.a*m.d - m.b*m.c;
+  return result;
+}
+
+Mat2_8x inverse(Mat2_8x m) {
+  Mat2_8x result = 1/det(m)*Mat2_8x{m.d, -m.b, -m.c, m.a};
   return result;
 }
 

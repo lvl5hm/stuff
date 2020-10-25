@@ -8,6 +8,9 @@ typedef void (*Worker_Fn)(void *data);
 void add_thread_task(Thread_Queue *, Worker_Fn, void *);
 void wait_for_all_tasks(Thread_Queue *queue);
 
+globalvar f64 foo_total = 0;
+globalvar f64 foo_count = 0;
+
 struct Timed_Block {
   u64 m_stamp;
   u64 m_count;
@@ -19,9 +22,11 @@ struct Timed_Block {
 
   ~Timed_Block() {
     f64 time_per_count = (f64)(__rdtsc() - m_stamp)/(f64)m_count;
+    foo_total += time_per_count;
+    foo_count++;
 
     char buffer[64];
-    sprintf_s(buffer, array_count(buffer), "%0.02f\n", time_per_count);
+    sprintf_s(buffer, array_count(buffer), "%0.02f\n", foo_total/foo_count);
     OutputDebugStringA(buffer);
   }
 };
@@ -148,12 +153,12 @@ i32_8x pixel_v4_to_u32_8x(V4_8x p) {
 struct Bilinear_Sample_8x {
   V4_8x a, b, c, d;
 };
-Bilinear_Sample_8x get_bilinear_sample(Bitmap bmp, V2i_8x coords) {
+Bilinear_Sample_8x get_bilinear_sample(Bitmap bmp, V2i_8x coords, i32_8x mask) {
   i32_8x offset = coords.y*bmp.pitch + coords.x;
-  i32_8x a = gather_i32(bmp.data, offset);
-  i32_8x b = gather_i32(bmp.data + 1, offset);
-  i32_8x c = gather_i32(bmp.data + bmp.pitch, offset);
-  i32_8x d = gather_i32(bmp.data + bmp.pitch + 1, offset);
+  i32_8x a = gather_i32(bmp.data, offset, mask);
+  i32_8x b = gather_i32(bmp.data + 1, offset, mask);
+  i32_8x c = gather_i32(bmp.data + bmp.pitch, offset, mask);
+  i32_8x d = gather_i32(bmp.data + bmp.pitch + 1, offset, mask);
 
   Bilinear_Sample_8x result;
   result.a = pixel_u32_to_v4_8x(a);
@@ -183,18 +188,18 @@ V4_8x bilinear_blend(Bilinear_Sample_8x sample, V2_8x c) {
   return abcd;
 }
 
-#if 0
-#define IACA_START
-#define IACA_END
-#else
-#include <iacaMarks.h>
-#endif
-void draw_bitmap_avx(Bitmap screen, Rect2 rect, f32 angle, Bitmap bmp, Rect2i clip_rect) {
+void draw_bitmap_avx(Bitmap screen, V3 p, V2 size, V3 angle, Bitmap bmp, Rect2i clip_rect) {
+  Rect2 rect = rect2_center_size(p.xy, size);
+
   Rect2 bitmap_rect = add_radius(rect, {1, 1});
   V2 bitmap_rect_size = get_size(bitmap_rect);
 
-  V2 x_axis = V2{cosf(angle), -sinf(angle)}*bitmap_rect_size.x;
-  V2 y_axis = V2{sinf(angle), cosf(angle)}*bitmap_rect_size.y;
+  Mat4 rotation_matrix = rotate(angle)*scale(v3(bitmap_rect_size/p.z, 0));
+
+  // V2 x_axis = V2{cosf(angle), -sinf(angle)}*bitmap_rect_size.x;
+  // V2 y_axis = V2{sinf(angle), cosf(angle}*bitmap_rect_size.y;
+  V2 x_axis = get_col(rotation_matrix, 0).xy;
+  V2 y_axis = get_col(rotation_matrix, 1).xy;
   V2 origin = get_center(bitmap_rect) - x_axis*0.5f - y_axis*0.5f;
 
   V2 vertices[] = {origin, origin + x_axis, origin + y_axis, origin + x_axis + y_axis};
@@ -227,8 +232,6 @@ void draw_bitmap_avx(Bitmap screen, Rect2 rect, f32 angle, Bitmap bmp, Rect2i cl
 
   V2 inverse_axis_length_sqr = 1/sqr(bitmap_rect_size);
 
-  V2_8x x_axis_8x = set8(x_axis);
-  V2_8x y_axis_8x = set8(y_axis);
   V2_8x inverse_axis_length_sqr_8x = set8(inverse_axis_length_sqr);
 
   V2_8x texture_size_8x = set8(texture_size);
@@ -236,27 +239,26 @@ void draw_bitmap_avx(Bitmap screen, Rect2 rect, f32 angle, Bitmap bmp, Rect2i cl
   V2_8x origin_8x = set8(origin);
 
   f32_8x pixel_x_offsets = {0, 1, 2, 3, 4, 5, 6, 7};
+  f32_8x eight_8x = set8(8);
 
   V2_8x texture_size_with_apron = texture_size_8x + 2/pixel_scale_8x;
+  Mat2_8x xform = inverse(set8(mat2(rotation_matrix)));
   
   if (has_area(paint_rect)) {
-    // TIMED_BLOCK(draw_pixel_avx, (u64)get_area(paint_rect));
+    TIMED_BLOCK(draw_pixel_avx, (u64)get_area(paint_rect));
 
     for (i32 y = paint_rect.min.y; y < paint_rect.max.y; y++) {
+      V2_8x d = V2_8x{set8((f32)paint_rect.min.x) + pixel_x_offsets, set8((f32)y)} - origin_8x;
+
       for (i32 x = paint_rect.min.x; x < paint_rect.max.x; x += 8) {
-        IACA_START
-
-        f32_8x x_float = set8((f32)x);
-        f32_8x y_float = set8((f32)y);
-        V2_8x d = V2_8x{x_float + pixel_x_offsets, y_float} - origin_8x;
-
-        V2_8x uv01 = V2_8x{dot(d, x_axis_8x), dot(d, y_axis_8x)}*inverse_axis_length_sqr_8x;
+        V2_8x uv01 = xform*d;
         V2_8x uv = uv01*texture_size_with_apron;
 
         V2_8x floored_uv = floor(uv);
         V2_8x fract_uv = clamp01((uv - floored_uv)*pixel_scale_8x);
 
-        Bilinear_Sample_8x sample = get_bilinear_sample(bmp, v2i_8x(floored_uv));
+        i32_8x write_mask = to_i32_8x((uv01.x >= 0) & (uv01.x < 1) & (uv01.y >= 0) & (uv01.y < 1));
+        Bilinear_Sample_8x sample = get_bilinear_sample(bmp, v2i_8x(floored_uv), write_mask);
         V4_8x texel = bilinear_blend(sample, fract_uv);
 
         Pixel *pixel_ptr = screen.data + y*screen.pitch + x;
@@ -266,88 +268,48 @@ void draw_bitmap_avx(Bitmap screen, Rect2 rect, f32 angle, Bitmap bmp, Rect2i cl
         V3_8x result_rgb = texel.rgb + pixel.rgb*(1 - texel.a/255.0f);
         i32_8x result = pixel_v4_to_u32_8x(v4_8x(result_rgb, set8(255)));
 
-        i32_8x write_mask = to_i32_8x((uv01.x >= 0) & (uv01.x < 1) & (uv01.y >= 0) & (uv01.y < 1));
         mask_store_i32_8x(pixel_ptr, write_mask, result);
 
-        // __writegsbyte(10, 10);
-
-        IACA_END
+        d.x += eight_8x;
       }
     }
   }
 }
-
-void draw_bitmap(Bitmap screen, Rect2 rect, f32 angle, Bitmap bmp) {
-  Rect2i screen_rect = {{0, 0}, {screen.width, screen.height}};
-
-  Rect2 bitmap_rect = add_radius(rect, {1, 1});
-  V2 bitmap_rect_size = get_size(bitmap_rect);
-
-  V2 x_axis = V2{cosf(angle), -sinf(angle)}*bitmap_rect_size.x;
-  V2 y_axis = V2{sinf(angle), cosf(angle)}*bitmap_rect_size.y;
-  V2 origin = get_center(bitmap_rect) - x_axis*0.5f - y_axis*0.5f;
-
-  V2 vertices[] = {origin, origin + x_axis, origin + y_axis, origin + x_axis + y_axis};
-
-  Rect2 drawn_rect = inverted_infinity_rect();
-  for (u32 vertex_index = 0; vertex_index < array_count(vertices); vertex_index++) {
-    V2 vertex = vertices[vertex_index];
-
-    drawn_rect.min.x = min(drawn_rect.min.x, vertex.x);
-    drawn_rect.min.y = min(drawn_rect.min.y, vertex.y);
-    drawn_rect.max.x = max(drawn_rect.max.x, vertex.x);
-    drawn_rect.max.y = max(drawn_rect.max.y, vertex.y);
-  }
-
-  Rect2i paint_rect = intersect(screen_rect, rect2i(drawn_rect));
-
-  V2 rect_size = get_size(drawn_rect);
-  V2i paint_size = get_size(paint_rect);
-
-  V2 texture_size = v2(bmp.width, bmp.height);
-  V2 pixel_scale = rect_size/texture_size;
-
-  V2 inverse_axis_length_sqr = 1/sqr(bitmap_rect_size);
-  
-  if (has_area(paint_rect)) {
-    for (i32 y = paint_rect.min.y; y < paint_rect.max.y; y++) {
-      for (i32 x = paint_rect.min.x; x < paint_rect.max.x; x++) {
-        V2 d = v2(x, y) - origin;
-        V2 uv01 = V2{dot(d, x_axis), dot(d, y_axis)}*inverse_axis_length_sqr;
-
-        if (uv01.x >= 0 && uv01.y >= 0 && uv01.x < 1 && uv01.y < 1) {
-          V2 uv = uv01*(texture_size + 2/pixel_scale);
-          V2 uv_floored = floor(uv);
-          V2 uv_fract = clamp01((uv - uv_floored)*pixel_scale);
-
-          Bilinear_Sample sample = get_bilinear_sample(bmp, v2i(uv_floored));
-          Pixel mixed_sample = bilinear_blend(sample, uv_fract);
-
-          Pixel pixel = screen.data[y*screen.pitch + x];
-          f32 alpha = (f32)mixed_sample.a/255.0f;
-          Pixel result = {
-            .r = (u8)(mixed_sample.r + pixel.r*(1 - alpha)),
-            .g = (u8)(mixed_sample.g + pixel.g*(1 - alpha)),
-            .b = (u8)(mixed_sample.b + pixel.b*(1 - alpha)),
-          };
-          screen.data[y*screen.pitch + x] = result;
-        }
-      }
-    }
-  }
-}
-
 
 struct Render_Region_Task {
   Rect2i region;
   Bitmap screen;
-  Rect2 rect;
-  f32 angle;
+  V3 p;
+  V2 size;
+  V3 angle;
   Bitmap bmp;
+  Pixel color;
 };
 
 void do_render_region_task(Render_Region_Task *task) {
-  draw_bitmap_avx(task->screen, task->rect, task->angle, task->bmp, task->region);
+  draw_bitmap_avx(task->screen, task->p, task->size, task->angle, task->bmp, task->region);
+}
+
+void draw_bitmap_threaded(Thread_Queue *queue, Bitmap screen, V3 p, V2 size, V3 angle, Bitmap bmp, Pixel color) {
+#define REGION_COUNT 24
+  Render_Region_Task tasks[REGION_COUNT];
+  for (i32 region_index = 0; region_index < REGION_COUNT; region_index += 1) {
+    V2i region_size = {screen.width, screen.height/REGION_COUNT};
+    Rect2i region = rect2i_min_size({0, region_size.y*region_index}, region_size);
+    tasks[region_index] = {
+      .region = region,
+      .screen = screen,
+      .p = p,
+      .size = size,
+      .angle = angle,
+      .bmp = bmp,
+      .color = color,
+    };
+
+    add_thread_task(queue, (Worker_Fn)do_render_region_task, tasks + region_index);
+  }
+  wait_for_all_tasks(queue);
+#undef REGION_COUNT
 }
 
 Bitmap win32_read_bmp(char *);
@@ -357,78 +319,23 @@ void game_update(Bitmap screen, Thread_Queue *thread_queue) {
   if (!loaded) {
     loaded = true;
     test_bmp = win32_read_bmp("test.bmp");
-
-    {
-      // TIMED_BLOCK(haha, 1);
-
-      // #define TEST_SIZE 10000
-      // i32 *foo = (i32 *)memalloc(sizeof(i32)*TEST_SIZE*TEST_SIZE);
-      // for (i32 y = 0; y < TEST_SIZE; y++) {
-      //   for (i32 x = 0; x < TEST_SIZE; x++) {
-      //     foo[y*TEST_SIZE + x] = 69;
-      //   }
-      // }
-    }
   }
 
 
   static f32 t = 0;
-  // t += 0.001f;
+  t += 0.001f;
   f32 scale = (sinf(t) + 1)*10 + 10;
   memset(screen.data, (i32)0xFF333333, (size_t)(screen.height*screen.pitch*(i32)sizeof(Pixel)));
 
-#if 1
-  {
-#define REGION_COUNT 24
-    TIMED_BLOCK(render_rect, 1);
-    Render_Region_Task tasks[REGION_COUNT];
-    for (i32 region_index = 0; region_index < REGION_COUNT; region_index += 1) {
-      V2i region_size = {screen.width, screen.height/REGION_COUNT};
-      Rect2i region = rect2i_min_size({0, region_size.y*region_index}, region_size);
-      tasks[region_index] = {
-        .region = region,
-        .screen = screen,
-        .rect = rect2_center_size(v2(screen.width, screen.height)*0.5f, v2(test_bmp.width*2, test_bmp.height)*scale),
-        .angle = t*10,
-        .bmp = test_bmp,
-      };
 
-      add_thread_task(thread_queue, (Worker_Fn)do_render_region_task, tasks + region_index);
-    }
-    wait_for_all_tasks(thread_queue);
-
-  }
-#endif
-
-#if 0
-  {
-    TIMED_BLOCK(render_rect, 1);
-    Rect2i region = rect2i_min_size({0, 0}, {screen.width, screen.height});
-    draw_bitmap_avx(screen, rect2_center_size(v2(screen.width, screen.height)*0.5f, v2(test_bmp.width*2, test_bmp.height)*scale), t*10, test_bmp, region);
-  }
-#endif
-
-#if 0
-  {
-    TIMED_BLOCK(render_rect, 1);
-    draw_bitmap(screen, rect2_center_size(v2(screen.width, screen.height)*0.5f, v2(test_bmp.width*2, test_bmp.height)*scale), t*10, test_bmp);
-  }
-#endif
-
-  int break_here = 23;
-
-#if 0
-  Layout *layout = &_layout;
-
-  ui_grid_begin(layout, {
-    .cols = 2,
-    .rows = 2,
-  }); {
-    ui_block(layout, RED);
-    ui_block(layout, GREEN);
-    ui_block(layout, YELLOW);
-  } ui_grid_end(layout);
-
-  ui_layout_end(layout);
-#endif
+  V3 p = {screen.width*0.5f, screen.height*0.5f, 1};
+  draw_bitmap_threaded(
+    thread_queue, 
+    screen,
+    p,
+    v2(test_bmp.width, test_bmp.height)*scale, 
+    {t*10, 0, 0},
+    test_bmp,
+    {0xFFFF0000}
+  );
 }
