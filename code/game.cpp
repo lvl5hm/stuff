@@ -1,5 +1,6 @@
 #include "lvl5_types.h"
 #include <memory.h>
+#include "lvl5_context.h"
 
 extern "C" void OutputDebugStringA(const char *);
 
@@ -188,16 +189,82 @@ V4_8x bilinear_blend(Bilinear_Sample_8x sample, V2_8x c) {
   return abcd;
 }
 
+void draw_rect_avx(Bitmap screen, V3 p, V2 size, V3 angle, Pixel color, Rect2i clip_rect) {
+  Rect2 rect = rect2_center_size(p.xy, size);
+
+  Rect2 bitmap_rect = add_radius(rect, {1, 1});
+  V2 bitmap_rect_size = get_size(bitmap_rect);
+
+  Mat4 rotation_matrix = rotate(angle)*scale(v3(bitmap_rect_size, 0));
+
+  V2 x_axis = get_col(rotation_matrix, 0).xy;
+  V2 y_axis = get_col(rotation_matrix, 1).xy;
+  V2 origin = get_center(bitmap_rect) - x_axis*0.5f - y_axis*0.5f;
+
+  V2 vertices[] = {origin, origin + x_axis, origin + y_axis, origin + x_axis + y_axis};
+
+  Rect2 drawn_rect = inverted_infinity_rect();
+  for (u32 vertex_index = 0; vertex_index < array_count(vertices); vertex_index++) {
+    V2 vertex = vertices[vertex_index];
+
+    drawn_rect.min.x = min(drawn_rect.min.x, vertex.x);
+    drawn_rect.min.y = min(drawn_rect.min.y, vertex.y);
+    drawn_rect.max.x = max(drawn_rect.max.x, vertex.x);
+    drawn_rect.max.y = max(drawn_rect.max.y, vertex.y);
+  }
+
+  Rect2i paint_rect = intersect(clip_rect, rect2i(drawn_rect));
+  V2 rect_size = get_size(drawn_rect);
+
+  if (paint_rect.min.x & 7) {
+    paint_rect.min.x = paint_rect.min.x & (~7);
+  }
+  if (paint_rect.max.x & 7) {
+    paint_rect.max.x = (paint_rect.max.x & (~7)) + 8;
+  }
+
+  V2i paint_size = get_size(paint_rect);
+  V2 inverse_axis_length_sqr = 1/sqr(bitmap_rect_size);
+  V2_8x inverse_axis_length_sqr_8x = set8(inverse_axis_length_sqr);
+  V2_8x origin_8x = set8(origin);
+  f32_8x pixel_x_offsets = {0, 1, 2, 3, 4, 5, 6, 7};
+  f32_8x eight_8x = set8(8);
+  Mat2_8x xform = inverse(set8(mat2(rotation_matrix)));
+
+  V4_8x texel = pixel_u32_to_v4_8x(set8i((i32)color.rgba));
+  
+  if (has_area(paint_rect)) {
+    TIMED_BLOCK(draw_pixel_avx, (u64)get_area(paint_rect));
+
+    for (i32 y = paint_rect.min.y; y < paint_rect.max.y; y++) {
+      V2_8x d = V2_8x{set8((f32)paint_rect.min.x) + pixel_x_offsets, set8((f32)y)} - origin_8x;
+
+      for (i32 x = paint_rect.min.x; x < paint_rect.max.x; x += 8) {
+        V2_8x uv01 = xform*d;
+        i32_8x write_mask = to_i32_8x((uv01.x >= 0) & (uv01.x < 1) & (uv01.y >= 0) & (uv01.y < 1));
+
+        Pixel *pixel_ptr = screen.data + y*screen.pitch + x;
+        i32_8x pixel_u32 = load_i32_8x(pixel_ptr);
+        V4_8x pixel = pixel_u32_to_v4_8x(pixel_u32);
+
+        V3_8x result_rgb = texel.rgb + pixel.rgb*(1 - texel.a/255.0f);
+        i32_8x result = pixel_v4_to_u32_8x(v4_8x(result_rgb, set8(255)));
+        mask_store_i32_8x(pixel_ptr, write_mask, result);
+
+        d.x += eight_8x;
+      }
+    }
+  }
+}
+
 void draw_bitmap_avx(Bitmap screen, V3 p, V2 size, V3 angle, Bitmap bmp, Rect2i clip_rect) {
   Rect2 rect = rect2_center_size(p.xy, size);
 
   Rect2 bitmap_rect = add_radius(rect, {1, 1});
   V2 bitmap_rect_size = get_size(bitmap_rect);
 
-  Mat4 rotation_matrix = rotate(angle)*scale(v3(bitmap_rect_size/p.z, 0));
+  Mat4 rotation_matrix = rotate(angle)*scale(v3(bitmap_rect_size, 0));
 
-  // V2 x_axis = V2{cosf(angle), -sinf(angle)}*bitmap_rect_size.x;
-  // V2 y_axis = V2{sinf(angle), cosf(angle}*bitmap_rect_size.y;
   V2 x_axis = get_col(rotation_matrix, 0).xy;
   V2 y_axis = get_col(rotation_matrix, 1).xy;
   V2 origin = get_center(bitmap_rect) - x_axis*0.5f - y_axis*0.5f;
@@ -225,7 +292,6 @@ void draw_bitmap_avx(Bitmap screen, V3 p, V2 size, V3 angle, Bitmap bmp, Rect2i 
     paint_rect.max.x = (paint_rect.max.x & (~7)) + 8;
   }
   V2i paint_size = get_size(paint_rect);
-
 
   V2 texture_size = v2(bmp.width, bmp.height);
   V2 pixel_scale = rect_size/texture_size;
@@ -267,7 +333,6 @@ void draw_bitmap_avx(Bitmap screen, V3 p, V2 size, V3 angle, Bitmap bmp, Rect2i 
 
         V3_8x result_rgb = texel.rgb + pixel.rgb*(1 - texel.a/255.0f);
         i32_8x result = pixel_v4_to_u32_8x(v4_8x(result_rgb, set8(255)));
-
         mask_store_i32_8x(pixel_ptr, write_mask, result);
 
         d.x += eight_8x;
@@ -286,8 +351,33 @@ struct Render_Region_Task {
   Pixel color;
 };
 
-void do_render_region_task(Render_Region_Task *task) {
+void do_render_bitmap_region_task(Render_Region_Task *task) {
   draw_bitmap_avx(task->screen, task->p, task->size, task->angle, task->bmp, task->region);
+}
+
+void do_render_rect_region_task(Render_Region_Task *task) {
+  draw_rect_avx(task->screen, task->p, task->size, task->angle, task->color, task->region);
+}
+
+void draw_rect_threaded(Thread_Queue *queue, Bitmap screen, V3 p, V2 size, V3 angle, Pixel color) {
+#define REGION_COUNT 24
+  Render_Region_Task tasks[REGION_COUNT];
+  for (i32 region_index = 0; region_index < REGION_COUNT; region_index += 1) {
+    V2i region_size = {screen.width, screen.height/REGION_COUNT};
+    Rect2i region = rect2i_min_size({0, region_size.y*region_index}, region_size);
+    tasks[region_index] = {
+      .region = region,
+      .screen = screen,
+      .p = p,
+      .size = size,
+      .angle = angle,
+      .color = color,
+    };
+
+    add_thread_task(queue, (Worker_Fn)do_render_rect_region_task, tasks + region_index);
+  }
+  wait_for_all_tasks(queue);
+#undef REGION_COUNT
 }
 
 void draw_bitmap_threaded(Thread_Queue *queue, Bitmap screen, V3 p, V2 size, V3 angle, Bitmap bmp, Pixel color) {
@@ -306,7 +396,7 @@ void draw_bitmap_threaded(Thread_Queue *queue, Bitmap screen, V3 p, V2 size, V3 
       .color = color,
     };
 
-    add_thread_task(queue, (Worker_Fn)do_render_region_task, tasks + region_index);
+    add_thread_task(queue, (Worker_Fn)do_render_bitmap_region_task, tasks + region_index);
   }
   wait_for_all_tasks(queue);
 #undef REGION_COUNT
@@ -314,6 +404,157 @@ void draw_bitmap_threaded(Thread_Queue *queue, Bitmap screen, V3 p, V2 size, V3 
 
 Bitmap win32_read_bmp(char *);
 globalvar Bitmap test_bmp;
+
+
+globalvar char *GATE_AND = "and";
+globalvar char *GATE_NOT = "not";
+globalvar char *GATE_IN = "in";
+globalvar char *GATE_OUT = "out";
+
+
+struct Gate {
+  char *name;
+  u32 parent;
+};
+
+struct Wire {
+  u32 start_gate;
+  u32 start;
+
+  u32 end_gate;
+  u32 end;
+};
+
+struct Signal {
+  u32 gate;
+  u32 in;
+  bool value;
+};
+
+u32 make_gate(Gate *gates, Gate gate) {
+  u32 result = (u32)sb_count(gates);
+  sb_push(gates, gate);
+  return result;
+}
+
+u32 gate_and(Gate *gates) {
+  u32 result = make_gate(gates, { GATE_AND });
+  return result;
+}
+
+u32 gate_not(Gate *gates) {
+  u32 result = make_gate(gates, { GATE_NOT });
+  return result;
+}
+
+void add_signal(Signal *signals, Signal signal) {
+  sb_push(signals, signal);
+}
+
+Signal *get_signal(Signal *signals, u32 gate, u32 in) {
+  Signal *result = nullptr;
+  for (u32 i = 0; i < sb_count(signals); i++) {
+    Signal *s = signals + i;
+    if (s->gate == gate && s->in == in) {
+      result = s;
+      break;
+    }
+  }
+  return result;
+}
+
+void connect(Wire *wires, Wire wire) {
+  sb_push(wires, wire);
+}
+
+bool run(Gate *gates, Wire *wires, Signal *signals, u32 gate_id) {
+  bool did_run = false;
+
+  Gate *gate = gates + gate_id;
+  bool *values = sb_make(bool, 32);
+
+  if (gate->name == GATE_NOT) {
+    Signal *a = get_signal(signals, gate_id, 0);
+    if (a) { 
+      sb_push(values, !a->value);
+      did_run = true;
+    } else {
+      goto end;
+    }
+  } else if (gate->name == GATE_AND) {
+    Signal *a = get_signal(signals, gate_id, 0);
+    Signal *b = get_signal(signals, gate_id, 1);
+    if (a && b) { 
+      sb_push(values, a->value && b->value);
+      did_run = true;
+    } else {
+      goto end;
+    }
+  } else {
+    u32 *outs = sb_make(u32, 32);
+    u32 *ins = sb_make(u32, 32);
+    for (u32 i = 0; i < sb_count(gates); i++) {
+      Gate *g = gates + i;
+      if (g->parent == gate_id) {
+        if (g->name == GATE_IN) {
+          sb_push(ins, i);
+        } else if (g->name == GATE_OUT) {
+          sb_push(outs, i);
+        }
+      }
+    }
+
+    u32 *pending_gates = sb_make(u32, 32);
+
+    for (u32 i = 0; i < sb_count(ins); i++) {
+      u32 in_id = ins[i];
+      Signal *s = get_signal(signals, gate_id, i);
+      if (!s) {
+        goto end;
+      }
+
+      for (u32 wire_index = 0; wire_index < sb_count(wires); wire_index++) {
+        Wire *w = wires + wire_index;
+        if (w->start_gate == in_id) {
+          add_signal(signals, { w->end_gate, w->end, s->value });
+          sb_push(pending_gates, w->end_gate);
+        }
+      }
+    }
+
+    while (sb_count(pending_gates) > 0) {
+      for (u32 gate_index = 0; gate_index < sb_count(pending_gates); gate_index++) {
+        u32 cur_id = pending_gates[gate_index];
+        Gate *cur = gates + cur_id;
+        if (cur->name == GATE_OUT) {
+          u32 out_index = 0;
+          for (u32 i = 0; i < sb_count(outs); i++) {
+            if (outs[i] == cur_id) {
+              out_index = i;
+              break;
+            }
+          }
+          Signal *s = get_signal(signals, cur_id, 0);
+          values[out_index] = s->value;
+        } else {
+          bool cur_did_run = run(gates, wires, signals, cur_id);
+          if (cur_did_run) {
+            pending_gates[gate_index] = pending_gates[--sb_count(pending_gates)];
+          }
+        }
+      }
+    }
+
+    did_run = true;
+  }
+
+  for (u32 i = 0; i < sb_count(values); i++) {
+    add_signal(signals, { gate_id, i, values[i] });
+  }
+  
+  end:
+  return did_run;
+}
 
 void game_update(Bitmap screen, Thread_Queue *thread_queue) {
   if (!loaded) {
@@ -328,14 +569,28 @@ void game_update(Bitmap screen, Thread_Queue *thread_queue) {
   memset(screen.data, (i32)0xFF333333, (size_t)(screen.height*screen.pitch*(i32)sizeof(Pixel)));
 
 
-  V3 p = {screen.width*0.5f, screen.height*0.5f, 1};
-  draw_bitmap_threaded(
-    thread_queue, 
-    screen,
-    p,
-    v2(test_bmp.width, test_bmp.height)*scale, 
-    {t*10, 0, 0},
-    test_bmp,
-    {0xFFFF0000}
-  );
+  Gate *gates = sb_make(Gate, 64);
+  Wire *wires = sb_make(Wire, 64);
+  Signal *signals = sb_make(Signal, 64);
+
+  make_gate(gates, {"null"});
+  sb_push(wires, (Wire{}));
+  sb_push(signals, (Signal{}));
+
+  u32 test = make_gate(gates, { "test" });
+  u32 test_in_a = make_gate(gates, { GATE_IN, test });
+  u32 test_in_b = make_gate(gates, { GATE_IN, test });
+  u32 test_out = make_gate(gates, { GATE_OUT, test });
+
+  u32 test_and = make_gate(gates, { GATE_AND, test });
+  u32 test_not = make_gate(gates, { GATE_NOT, test });
+
+  connect(wires, { test_in_a, 0, test_and, 0 });
+  connect(wires, { test_in_b, 0, test_and, 1 });
+  connect(wires, { test_and, 0, test_not, 0 });
+  connect(wires, { test_not, 0, test_out, 0 });
+
+  add_signal(signals, { test, 0, 1 });
+  add_signal(signals, { test, 1, 1 });
+  run(gates, wires, signals, test);
 }

@@ -199,6 +199,7 @@ void *__sb_make(Mem_Size element_size, u32 capacity) {
   Context *ctx = get_context();
 
   sb_Header *array_memory = (sb_Header *)memalloc(sizeof(sb_Header) + element_size*capacity);
+  memset(array_memory, 0, sizeof(sb_Header) + element_size*capacity);
 
   sb_Header header = {
     .data = array_memory + 1,
