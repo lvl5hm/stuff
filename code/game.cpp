@@ -84,10 +84,10 @@ void draw_rect(Bitmap screen, Rect2 rect, Pixel color) {
 
 #define RED Pixel{0xFFFF0000}
 #define BLUE Pixel{0xFF0000FF}
-#define GREEN Pixel{0xFF0000FF}
+#define GREEN Pixel{0xFF00FF00}
 #define BLACK Pixel{0xFF000000}
 #define WHITE Pixel{0xFFFFFFFF}
-#define YELLOW Pixel{0xFFFF00FF}
+#define YELLOW Pixel{0xFFFFFF00}
 #define PINK Pixel{0xFFff63ed}
 
 globalvar Layout _layout = {};
@@ -100,12 +100,6 @@ void ui_grid_begin(Layout *layout, Grid_Props props) {
     .children = sb_make(Element, 16),
   };
 
-  // if (!layout->root) {
-  //   layout->root = e;
-  //   layout->current_parent = &layout->root;
-  // } else {
-  //   sb_push(layout->current_parent->children, e);
-  // }
 }
 
 Pixel lerp(Pixel a, Pixel b, f32 c) {
@@ -189,13 +183,13 @@ V4_8x bilinear_blend(Bilinear_Sample_8x sample, V2_8x c) {
   return abcd;
 }
 
-void draw_rect_avx(Bitmap screen, V3 p, V2 size, V3 angle, Pixel color, Rect2i clip_rect) {
-  Rect2 rect = rect2_center_size(p.xy, size);
+void draw_rect_avx(Bitmap screen, V2 p, V2 size, f32 angle, Pixel color, Rect2i clip_rect) {
+  Rect2 rect = rect2_center_size(p, size);
 
   Rect2 bitmap_rect = add_radius(rect, {1, 1});
   V2 bitmap_rect_size = get_size(bitmap_rect);
 
-  Mat4 rotation_matrix = rotate(angle)*scale(v3(bitmap_rect_size, 0));
+  Mat4 rotation_matrix = rotate({0, 0, angle})*scale(v3(bitmap_rect_size, 0));
 
   V2 x_axis = get_col(rotation_matrix, 0).xy;
   V2 y_axis = get_col(rotation_matrix, 1).xy;
@@ -257,13 +251,13 @@ void draw_rect_avx(Bitmap screen, V3 p, V2 size, V3 angle, Pixel color, Rect2i c
   }
 }
 
-void draw_bitmap_avx(Bitmap screen, V3 p, V2 size, V3 angle, Bitmap bmp, Rect2i clip_rect) {
-  Rect2 rect = rect2_center_size(p.xy, size);
+void draw_bitmap_avx(Bitmap screen, V2 p, V2 size, f32 angle, Bitmap bmp, Rect2i clip_rect) {
+  Rect2 rect = rect2_center_size(p, size);
 
   Rect2 bitmap_rect = add_radius(rect, {1, 1});
   V2 bitmap_rect_size = get_size(bitmap_rect);
 
-  Mat4 rotation_matrix = rotate(angle)*scale(v3(bitmap_rect_size, 0));
+  Mat4 rotation_matrix = rotate({0, 0, angle})*scale(v3(bitmap_rect_size, 0));
 
   V2 x_axis = get_col(rotation_matrix, 0).xy;
   V2 y_axis = get_col(rotation_matrix, 1).xy;
@@ -344,9 +338,9 @@ void draw_bitmap_avx(Bitmap screen, V3 p, V2 size, V3 angle, Bitmap bmp, Rect2i 
 struct Render_Region_Task {
   Rect2i region;
   Bitmap screen;
-  V3 p;
+  V2 p;
   V2 size;
-  V3 angle;
+  f32 angle;
   Bitmap bmp;
   Pixel color;
 };
@@ -359,19 +353,30 @@ void do_render_rect_region_task(Render_Region_Task *task) {
   draw_rect_avx(task->screen, task->p, task->size, task->angle, task->color, task->region);
 }
 
-void draw_rect_threaded(Thread_Queue *queue, Bitmap screen, V3 p, V2 size, V3 angle, Pixel color) {
+struct Line_Params {
+  Bitmap screen;
+  V2 start;
+  V2 end;
+  f32 thickness;
+  Pixel color;
+};
+void draw_line_threaded(Thread_Queue *queue, Line_Params params) {
 #define REGION_COUNT 24
   Render_Region_Task tasks[REGION_COUNT];
+  int foo = 32;
   for (i32 region_index = 0; region_index < REGION_COUNT; region_index += 1) {
-    V2i region_size = {screen.width, screen.height/REGION_COUNT};
+    V2i region_size = {params.screen.width, params.screen.height/REGION_COUNT};
     Rect2i region = rect2i_min_size({0, region_size.y*region_index}, region_size);
+
+    V2 line = params.end - params.start;
+
     tasks[region_index] = {
+      .screen = params.screen,
       .region = region,
-      .screen = screen,
-      .p = p,
-      .size = size,
-      .angle = angle,
-      .color = color,
+      .p = params.start + line*0.5f,
+      .size = {len(line), params.thickness},
+      .angle = get_angle(line),
+      .color = params.color,
     };
 
     add_thread_task(queue, (Worker_Fn)do_render_rect_region_task, tasks + region_index);
@@ -380,21 +385,29 @@ void draw_rect_threaded(Thread_Queue *queue, Bitmap screen, V3 p, V2 size, V3 an
 #undef REGION_COUNT
 }
 
-void draw_bitmap_threaded(Thread_Queue *queue, Bitmap screen, V3 p, V2 size, V3 angle, Bitmap bmp, Pixel color) {
+void draw_rect_threaded(Thread_Queue *queue, Render_Region_Task params) {
 #define REGION_COUNT 24
   Render_Region_Task tasks[REGION_COUNT];
   for (i32 region_index = 0; region_index < REGION_COUNT; region_index += 1) {
-    V2i region_size = {screen.width, screen.height/REGION_COUNT};
+    V2i region_size = {params.screen.width, params.screen.height/REGION_COUNT};
     Rect2i region = rect2i_min_size({0, region_size.y*region_index}, region_size);
-    tasks[region_index] = {
-      .region = region,
-      .screen = screen,
-      .p = p,
-      .size = size,
-      .angle = angle,
-      .bmp = bmp,
-      .color = color,
-    };
+    tasks[region_index] = params;
+    tasks[region_index].region = region;
+
+    add_thread_task(queue, (Worker_Fn)do_render_rect_region_task, tasks + region_index);
+  }
+  wait_for_all_tasks(queue);
+#undef REGION_COUNT
+}
+
+void draw_bitmap_threaded(Thread_Queue *queue, Render_Region_Task params) {
+#define REGION_COUNT 24
+  Render_Region_Task tasks[REGION_COUNT];
+  for (i32 region_index = 0; region_index < REGION_COUNT; region_index += 1) {
+    V2i region_size = {params.screen.width, params.screen.height/REGION_COUNT};
+    Rect2i region = rect2i_min_size({0, region_size.y*region_index}, region_size);
+    tasks[region_index] = params;
+    tasks[region_index].region = region;
 
     add_thread_task(queue, (Worker_Fn)do_render_bitmap_region_task, tasks + region_index);
   }
@@ -406,154 +419,311 @@ Bitmap win32_read_bmp(char *);
 globalvar Bitmap test_bmp;
 
 
-globalvar char *GATE_AND = "and";
-globalvar char *GATE_NOT = "not";
-globalvar char *GATE_IN = "in";
-globalvar char *GATE_OUT = "out";
+globalvar const char *GATE_AND = "and";
+globalvar const char *GATE_NOT = "not";
+globalvar const char *GATE_IN = "in";
+globalvar const char *GATE_OUT = "out";
 
+struct Gate;
+
+struct Pin {
+  bool ready;
+  bool value;
+  Gate *gate;
+};
 
 struct Gate {
-  char *name;
-  u32 parent;
+  const char *name;
+  Pin *pins;
+  u32 in_count;
+  u32 out_count;
+
+  Gate **children;
+  V2 p;
 };
 
 struct Wire {
-  u32 start_gate;
-  u32 start;
+  Gate *start;
+  u32 start_index;
 
-  u32 end_gate;
-  u32 end;
+  Gate *end;
+  u32 end_index;
 };
 
-struct Signal {
-  u32 gate;
-  u32 in;
-  bool value;
+struct State {
+  Gate *gates;
+  Wire *wires;
 };
 
-u32 make_gate(Gate *gates, Gate gate) {
-  u32 result = (u32)sb_count(gates);
-  sb_push(gates, gate);
+Gate *make_gate(State *state, Gate *parent, const char *name, u32 ins, u32 outs) {
+  sb_push(state->gates, (Gate{}));
+  Gate *result = state->gates + sb_count(state->gates) - 1;
+  result->pins = sb_make(Pin, ins + outs);
+  result->in_count = ins;
+  result->out_count = outs;
+  result->name = name;
+
+  if (parent) {
+    if (!parent->children) {
+      parent->children = sb_make(Gate *, 32);
+    }
+    sb_push(parent->children, result);
+  }
   return result;
 }
 
-u32 gate_and(Gate *gates) {
-  u32 result = make_gate(gates, { GATE_AND });
+Gate *gate_and(State *state, Gate *parent) {
+  Gate *result = make_gate(state, parent, GATE_AND, 2, 1);
   return result;
 }
 
-u32 gate_not(Gate *gates) {
-  u32 result = make_gate(gates, { GATE_NOT });
+Gate *gate_not(State *state, Gate *parent) {
+  Gate *result = make_gate(state, parent, GATE_NOT, 1, 1);
   return result;
 }
 
-void add_signal(Signal *signals, Signal signal) {
-  sb_push(signals, signal);
+Gate *gate_in(State *state, Gate *parent, u32 in) {
+  Gate *result = make_gate(state, parent, GATE_IN, 0, 1);
+  parent->pins[in].gate = result;
+  return result;
 }
 
-Signal *get_signal(Signal *signals, u32 gate, u32 in) {
-  Signal *result = nullptr;
-  for (u32 i = 0; i < sb_count(signals); i++) {
-    Signal *s = signals + i;
-    if (s->gate == gate && s->in == in) {
-      result = s;
+Gate *gate_out(State *state, Gate *parent, u32 out) {
+  Gate *result = make_gate(state, parent, GATE_OUT, 1, 0);
+  parent->pins[parent->in_count + out].gate = result;
+  return result;
+}
+
+void connect(State *state, Wire wire) {
+  sb_push(state->wires, wire);
+}
+
+bool contains(Gate **gates, Gate *element) {
+  bool result = false;
+  for (u32 i = 0; i < sb_count(gates); i++) {
+    if (gates[i] == element) {
+      result = true;
       break;
     }
   }
   return result;
 }
 
-void connect(Wire *wires, Wire wire) {
-  sb_push(wires, wire);
+bool in_connected(State *state, Gate *gate, u32 in_index) {
+  bool result = false;
+  for (u32 i = 0; i < sb_count(state->wires); i++) {
+    if (state->wires[i].end == gate && state->wires[i].end_index == in_index) {
+      result = true;
+      break;
+    }
+  }
+  return result;
 }
 
-bool run(Gate *gates, Wire *wires, Signal *signals, u32 gate_id) {
-  bool did_run = false;
+void set_pin(Gate *gate, u32 pin_index, bool value) {
+  gate->pins[pin_index].value = value;
+  gate->pins[pin_index].ready = true;
+}
 
-  Gate *gate = gates + gate_id;
-  bool *values = sb_make(bool, 32);
+bool *run(State *state, Gate *gate) {
+#define INS(g, n) (g)->pins[n]
+#define OUTS(g, n) (g)->pins[(g)->in_count + (n)]
 
-  if (gate->name == GATE_NOT) {
-    Signal *a = get_signal(signals, gate_id, 0);
-    if (a) { 
-      sb_push(values, !a->value);
-      did_run = true;
-    } else {
-      goto end;
+  bool *result = sb_make(bool, gate->out_count);
+
+  if (gate->name == GATE_AND) {
+    OUTS(gate, 0).value = INS(gate, 0).value && INS(gate, 1).value;
+  } else if (gate->name == GATE_NOT) {
+    OUTS(gate, 0).value = !INS(gate, 0).value;
+  } else if (gate->name != GATE_IN && gate->name != GATE_OUT) {
+    for (u32 in_index = 0; in_index < gate->in_count; in_index++) {
+      Pin in = INS(gate, in_index);
+      OUTS(in.gate, 0).value = in.value;
+      run(state, in.gate);
     }
-  } else if (gate->name == GATE_AND) {
-    Signal *a = get_signal(signals, gate_id, 0);
-    Signal *b = get_signal(signals, gate_id, 1);
-    if (a && b) { 
-      sb_push(values, a->value && b->value);
-      did_run = true;
-    } else {
-      goto end;
+    // TODO: run all child gates that do not have any ins
+
+    for (u32 out_index = 0; out_index < state->gates->out_count; out_index++) {
+      Pin *pin = &OUTS(gate, out_index);
+      pin->value = INS(pin->gate, 0).value;
     }
-  } else {
-    u32 *outs = sb_make(u32, 32);
-    u32 *ins = sb_make(u32, 32);
-    for (u32 i = 0; i < sb_count(gates); i++) {
-      Gate *g = gates + i;
-      if (g->parent == gate_id) {
-        if (g->name == GATE_IN) {
-          sb_push(ins, i);
-        } else if (g->name == GATE_OUT) {
-          sb_push(outs, i);
-        }
-      }
-    }
-
-    u32 *pending_gates = sb_make(u32, 32);
-
-    for (u32 i = 0; i < sb_count(ins); i++) {
-      u32 in_id = ins[i];
-      Signal *s = get_signal(signals, gate_id, i);
-      if (!s) {
-        goto end;
-      }
-
-      for (u32 wire_index = 0; wire_index < sb_count(wires); wire_index++) {
-        Wire *w = wires + wire_index;
-        if (w->start_gate == in_id) {
-          add_signal(signals, { w->end_gate, w->end, s->value });
-          sb_push(pending_gates, w->end_gate);
-        }
-      }
-    }
-
-    while (sb_count(pending_gates) > 0) {
-      for (u32 gate_index = 0; gate_index < sb_count(pending_gates); gate_index++) {
-        u32 cur_id = pending_gates[gate_index];
-        Gate *cur = gates + cur_id;
-        if (cur->name == GATE_OUT) {
-          u32 out_index = 0;
-          for (u32 i = 0; i < sb_count(outs); i++) {
-            if (outs[i] == cur_id) {
-              out_index = i;
-              break;
-            }
-          }
-          Signal *s = get_signal(signals, cur_id, 0);
-          values[out_index] = s->value;
-        } else {
-          bool cur_did_run = run(gates, wires, signals, cur_id);
-          if (cur_did_run) {
-            pending_gates[gate_index] = pending_gates[--sb_count(pending_gates)];
-          }
-        }
-      }
-    }
-
-    did_run = true;
-  }
-
-  for (u32 i = 0; i < sb_count(values); i++) {
-    add_signal(signals, { gate_id, i, values[i] });
   }
   
-  end:
-  return did_run;
+  for (u32 out_index = 0; out_index < gate->out_count; out_index++) {
+    result[out_index] = OUTS(gate, out_index).value;
+
+    for (u32 wire_index = 0; wire_index < sb_count(state->wires); wire_index++) {
+      Wire *w = state->wires + wire_index;
+      if (w->start == gate) {
+        Pin *start_pin = &OUTS(gate, out_index);
+        set_pin(w->end, w->end_index, start_pin->value);
+
+        bool all_pins_ready = true;
+        for (u32 end_in_index = 0; end_in_index < w->end->in_count; end_in_index++) {
+          if (in_connected(state, w->end, end_in_index) && !INS(w->end, end_in_index).ready) {
+            all_pins_ready = false;
+            break;
+          }
+        }
+        if (all_pins_ready) {
+          run(state, w->end);
+        }
+      }
+    }
+  }
+
+  return result;
+
+#undef INS
+#undef OUTS
+}
+
+Gate *gate_nand(State *state, Gate *parent) {
+  Gate *nand = make_gate(state, parent, "nand", 2, 1);
+  Gate *a = gate_in(state, nand, 0);
+  a->p = {100, 100};
+
+  Gate *b = gate_in(state, nand, 1);
+  b->p = {100, 200};
+
+  Gate *out = gate_out(state, nand, 0);
+
+  Gate *_and = gate_and(state, nand);
+  _and->p = {200, 150};
+
+  Gate *_not = gate_not(state, nand);
+  _not->p = {300, 150};
+
+  out->p = {400, 150};
+
+  connect(state, { a, 0, _and, 0 });
+  connect(state, { b, 0, _and, 1 });
+  connect(state, { _and, 0, _not, 0 });
+  connect(state, { _not, 0, out, 0 });
+
+  return nand;
+}
+
+Gate *gate_or(State *state, Gate *parent) {
+  Gate *result = make_gate(state, parent, "or", 2, 1);
+  Gate *a = gate_in(state, result, 0);
+  Gate *b = gate_in(state, result, 1);
+  Gate *out = gate_out(state, result, 0);
+
+  Gate *nand = gate_nand(state, result);
+  Gate *not_a = gate_not(state, result);
+  Gate *not_b = gate_not(state, result);
+
+  connect(state, { a, 0, not_a, 0 });
+  connect(state, { b, 0, not_b, 0 });
+  connect(state, { not_a, 0, nand, 0 });
+  connect(state, { not_b, 0, nand, 1 });
+  connect(state, { nand, 0, out, 0 });
+
+  return result;
+}
+
+Gate *gate_xor(State *state, Gate *parent) {
+  Gate *result = make_gate(state, parent, "xor", 2, 1);
+  Gate *a = gate_in(state, result, 0);
+  Gate *b = gate_in(state, result, 1);
+  Gate *out = gate_out(state, result, 0);
+
+  Gate *nand = gate_nand(state, result);
+  Gate *_or = gate_or(state, result);
+  Gate *_and = gate_and(state, result);
+
+  connect(state, {a, 0, nand, 0});
+  connect(state, {b, 0, nand, 1});
+  connect(state, {a, 0, _or, 0});
+  connect(state, {b, 0, _or, 1});
+  connect(state, {nand, 0, _and, 0});
+  connect(state, {_or, 0, _and, 1});
+  connect(state, {_and, 0, out, 0});
+
+  return result;
+}
+
+V2 get_gate_size(Gate *gate) {
+  V2 size;
+  if (gate->name == GATE_IN || gate->name == GATE_OUT) {
+    size = {20, 20};
+  } else {
+    size = {20, 40};
+  }
+  return size;
+}
+
+Pixel get_gate_color(Gate *gate) {
+  Pixel color;
+  if (gate->name == GATE_IN || gate->name == GATE_OUT) {
+    color = GREEN;
+  } else {
+    color = PINK;
+  }
+  return color;
+}
+
+V2 get_input_p(Gate *gate, u32 index) {
+  V2 size = get_gate_size(gate);
+  f32 interval = size.y/(f32)(gate->in_count);
+  V2 result = gate->p - size*0.5f + V2{0, (index + 0.5f)*interval};
+  return result;
+}
+V2 get_output_p(Gate *gate, u32 index) {
+  V2 size = get_gate_size(gate);
+  f32 interval = size.y/(f32)(gate->out_count);
+  V2 result = gate->p + size*0.5f - V2{0, (index + 0.5f)*interval};
+  return result;
+}
+
+void draw_gate_scheme(Thread_Queue *queue, Bitmap screen, State *state, Gate *gate) {
+  for (u32 child_index = 0; child_index < sb_count(gate->children); child_index++) {
+    Gate *child = gate->children[child_index];
+    Pixel color = get_gate_color(child);
+    V2 size = get_gate_size(child);
+
+    draw_rect_threaded(queue, {
+      .screen = screen,
+      .p = child->p,
+      .size = size,
+      .color = color
+    });
+
+    for (u32 wire_index = 0; wire_index < sb_count(state->wires); wire_index++) {
+      Wire *w = state->wires + wire_index;
+      if (w->start == child) {
+        draw_line_threaded(queue, {
+          .screen = screen,
+          .start = get_output_p(child, w->start_index),
+          .end = get_input_p(w->end, w->end_index),
+          .thickness = 3,
+          .color = w->end->pins[w->end_index].value ? RED : BLACK
+        });
+      }
+    }
+  }
+
+  for (u32 child_index = 0; child_index < sb_count(gate->children); child_index++) {
+    Gate *child = gate->children[child_index];
+
+    for (u32 in_index = 0; in_index < child->in_count; in_index++) {
+      draw_rect_threaded(queue, {
+        .screen = screen,
+        .p = get_input_p(child, in_index),
+        .size = {5, 5},
+        .color = YELLOW
+      });
+    }
+    for (u32 out_index = 0; out_index < child->out_count; out_index++) {
+      draw_rect_threaded(queue, {
+        .screen = screen,
+        .p = get_output_p(child, out_index),
+        .size = {5, 5},
+        .color = YELLOW
+      });
+    }
+  }
 }
 
 void game_update(Bitmap screen, Thread_Queue *thread_queue) {
@@ -571,26 +741,19 @@ void game_update(Bitmap screen, Thread_Queue *thread_queue) {
 
   Gate *gates = sb_make(Gate, 64);
   Wire *wires = sb_make(Wire, 64);
-  Signal *signals = sb_make(Signal, 64);
+  State _state = {
+    gates, wires
+  };
+  State *state = &_state;
 
-  make_gate(gates, {"null"});
-  sb_push(wires, (Wire{}));
-  sb_push(signals, (Signal{}));
 
-  u32 test = make_gate(gates, { "test" });
-  u32 test_in_a = make_gate(gates, { GATE_IN, test });
-  u32 test_in_b = make_gate(gates, { GATE_IN, test });
-  u32 test_out = make_gate(gates, { GATE_OUT, test });
+  Gate *nand = gate_nand(state, nullptr);
+  set_pin(nand, 1, false);
+  set_pin(nand, 0, false);
 
-  u32 test_and = make_gate(gates, { GATE_AND, test });
-  u32 test_not = make_gate(gates, { GATE_NOT, test });
+  bool *result = run(state, nand);
 
-  connect(wires, { test_in_a, 0, test_and, 0 });
-  connect(wires, { test_in_b, 0, test_and, 1 });
-  connect(wires, { test_and, 0, test_not, 0 });
-  connect(wires, { test_not, 0, test_out, 0 });
+  draw_gate_scheme(thread_queue, screen, state, nand);
 
-  add_signal(signals, { test, 0, 1 });
-  add_signal(signals, { test, 1, 1 });
-  run(gates, wires, signals, test);
+  int foo = 132;
 }

@@ -223,6 +223,7 @@ void __sb_maybe_grow(void **arr_ptr, Mem_Size element_size) {
   if (header->count == header->capacity) {
     header->capacity *= 2;
     sb_Header *array_memory = (sb_Header *)memalloc(sizeof(sb_Header) + element_size*header->capacity);
+    memset(array_memory, 0, sizeof(sb_Header) + element_size*header->capacity);
     memcpy(array_memory + 1, header->data, header->count*element_size);
     header->data = array_memory + 1;
     *array_memory = *header;

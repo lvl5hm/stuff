@@ -82,6 +82,11 @@ f32 len(V2 a) {
     return result;
 }
 
+f32 get_angle(V2 a) {
+  f32 result = atan2f(a.y, a.x);
+  return result;
+}
+
 union V3 {
   struct {
     f32 x, y, z;
