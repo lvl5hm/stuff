@@ -10,6 +10,7 @@ globalvar bool running = true;
 globalvar LARGE_INTEGER performance_frequency = {};
 globalvar Bitmap screen = {};
 globalvar BITMAPINFO screen_info = {};
+globalvar Mouse mouse;
 
 
 typedef struct {
@@ -327,12 +328,23 @@ void win32_resize_screen_buffer(HWND window) {
   };
 }
 
+void win32_process_button(Button *button, bool is_down) {
+  if (is_down && !button->is_down) {
+    button->went_down = true;
+  } else if (!is_down && button->is_down) {
+    button->went_up = true;
+  }
+  button->is_down = is_down;
+}
+
 LRESULT CALLBACK WindowProc(
   HWND window,
   UINT message,
   WPARAM w_param,
   LPARAM l_param
 ) {
+  LRESULT result = 0;
+
   switch (message) {
     case WM_CLOSE:
     case WM_QUIT: {
@@ -342,9 +354,12 @@ LRESULT CALLBACK WindowProc(
     case WM_SIZE: {
       win32_resize_screen_buffer(window);
     } break;
-  }
 
-  return DefWindowProcA(window, message, w_param, l_param);
+    default: {
+      result = DefWindowProcA(window, message, w_param, l_param);
+    }
+  }
+  return result;
 }
 
 
@@ -501,15 +516,41 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE prev_instance, PWSTR command_l
   while (running) { 
     MSG message;
 
+    POINT mouse_p;
+    assert(GetCursorPos(&mouse_p));
+    ScreenToClient(window, &mouse_p);
+
+
+    mouse.p = {(f32)mouse_p.x, (f32)(screen.height - mouse_p.y)};
+    mouse.left.went_down = false;
+    mouse.left.went_up = false;
+    mouse.right.went_down = false;
+    mouse.right.went_up = false;
+
     while (PeekMessageA(&message, window, 0, 0, PM_REMOVE)) {
       switch (message.message) {
+        case WM_LBUTTONDOWN: {
+          win32_process_button(&mouse.left, true);
+        } break;
+        case WM_LBUTTONUP: {
+          win32_process_button(&mouse.left, false);
+        } break;
+        case WM_RBUTTONDOWN: {
+          win32_process_button(&mouse.right, true);
+        } break;
+        case WM_RBUTTONUP: {
+          win32_process_button(&mouse.right, false);
+        } break;
+
         default: {
           DefWindowProcA(window, message.message, message.wParam, message.lParam);
         } break;
       }
     }
 
-    game_update(screen, &thread_queue);
+    Input input = { mouse };
+
+    game_update(screen, input, &thread_queue);
   
     StretchDIBits(
       device_context,

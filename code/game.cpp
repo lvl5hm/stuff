@@ -2,6 +2,21 @@
 #include <memory.h>
 #include "lvl5_context.h"
 
+struct Button {
+  bool is_down;
+  bool went_down;
+  bool went_up;
+};
+
+struct Mouse {
+  Button left, right;
+  V2 p;
+};
+
+struct Input {
+  Mouse mouse;
+};
+
 extern "C" void OutputDebugStringA(const char *);
 
 struct Thread_Queue;
@@ -28,7 +43,7 @@ struct Timed_Block {
 
     char buffer[64];
     sprintf_s(buffer, array_count(buffer), "%0.02f\n", foo_total/foo_count);
-    OutputDebugStringA(buffer);
+    // OutputDebugStringA(buffer);
   }
 };
 
@@ -453,6 +468,8 @@ struct Wire {
 struct State {
   Gate *gates;
   Wire *wires;
+
+  Gate *drag_gate;
 };
 
 Gate *make_gate(State *state, Gate *parent, const char *name, u32 ins, u32 outs) {
@@ -528,6 +545,15 @@ void set_pin(Gate *gate, u32 pin_index, bool value) {
 bool *run(State *state, Gate *gate) {
 #define INS(g, n) (g)->pins[n]
 #define OUTS(g, n) (g)->pins[(g)->in_count + (n)]
+
+  if (gate->children) {
+    for (u32 child_index = 0; child_index < sb_count(gate->children); child_index++) {
+      Gate *child = gate->children[child_index];
+      for (u32 in_index = 0; in_index < child->in_count; in_index++) {
+        INS(child, in_index).ready = false;
+      }
+    }
+  }
 
   bool *result = sb_make(bool, gate->out_count);
 
@@ -677,17 +703,28 @@ V2 get_output_p(Gate *gate, u32 index) {
   return result;
 }
 
-void draw_gate_scheme(Thread_Queue *queue, Bitmap screen, State *state, Gate *gate) {
+void draw_gate_scheme(Thread_Queue *queue, Input input, Bitmap screen, State *state, Gate *gate) {
+  if (state->drag_gate) {
+    state->drag_gate->p = input.mouse.p;
+
+    if (input.mouse.left.went_up) {
+      state->drag_gate = nullptr;
+    }
+  }
+
   for (u32 child_index = 0; child_index < sb_count(gate->children); child_index++) {
     Gate *child = gate->children[child_index];
     Pixel color = get_gate_color(child);
     V2 size = get_gate_size(child);
 
+    Rect2 rect = rect2_center_size(child->p, size);
+    bool mouse_over = point_in_rect(rect, input.mouse.p);
+
     draw_rect_threaded(queue, {
       .screen = screen,
       .p = child->p,
       .size = size,
-      .color = color
+      .color = mouse_over ? WHITE : color
     });
 
     for (u32 wire_index = 0; wire_index < sb_count(state->wires); wire_index++) {
@@ -701,6 +738,22 @@ void draw_gate_scheme(Thread_Queue *queue, Bitmap screen, State *state, Gate *ga
           .color = w->end->pins[w->end_index].value ? RED : BLACK
         });
       }
+    }
+
+    if (mouse_over && input.mouse.left.went_down) {
+      state->drag_gate = child;
+    }
+  }
+
+  for (u32 in_index = 0; in_index < gate->in_count; in_index++) {
+    Pin pin = gate->pins[in_index];
+    Gate *in = pin.gate;
+    V2 size = get_gate_size(in);
+    Rect2 rect = rect2_center_size(in->p, size);
+    bool mouse_over = point_in_rect(rect, input.mouse.p);
+    if (mouse_over && input.mouse.left.went_up) {
+      set_pin(gate, in_index, !pin.value);
+      run(state, gate);
     }
   }
 
@@ -726,10 +779,25 @@ void draw_gate_scheme(Thread_Queue *queue, Bitmap screen, State *state, Gate *ga
   }
 }
 
-void game_update(Bitmap screen, Thread_Queue *thread_queue) {
+globalvar State _state = {};
+globalvar Gate *nand;
+
+void game_update(Bitmap screen, Input input, Thread_Queue *thread_queue) {
+  State *state = &_state;
+
+
   if (!loaded) {
     loaded = true;
     test_bmp = win32_read_bmp("test.bmp");
+
+    _state.gates = sb_make(Gate, 64);
+    _state.wires = sb_make(Wire, 64);
+    nand = gate_nand(&_state, nullptr);
+
+    set_pin(nand, 1, false);
+    set_pin(nand, 0, false);
+
+    run(state, nand);
   }
 
 
@@ -738,22 +806,5 @@ void game_update(Bitmap screen, Thread_Queue *thread_queue) {
   f32 scale = (sinf(t) + 1)*10 + 10;
   memset(screen.data, (i32)0xFF333333, (size_t)(screen.height*screen.pitch*(i32)sizeof(Pixel)));
 
-
-  Gate *gates = sb_make(Gate, 64);
-  Wire *wires = sb_make(Wire, 64);
-  State _state = {
-    gates, wires
-  };
-  State *state = &_state;
-
-
-  Gate *nand = gate_nand(state, nullptr);
-  set_pin(nand, 1, false);
-  set_pin(nand, 0, false);
-
-  bool *result = run(state, nand);
-
-  draw_gate_scheme(thread_queue, screen, state, nand);
-
-  int foo = 132;
+  draw_gate_scheme(thread_queue, input, screen, state, nand);
 }

@@ -363,6 +363,11 @@ Rect2 inverted_infinity_rect() {
   return result;
 }
 
+bool point_in_rect(Rect2 rect, V2 point) {
+  bool result = point.x > rect.min.x && point.x < rect.max.x &&
+    point.y > rect.min.y && point.y < rect.max.y;
+  return result;
+}
 
 struct V2i {
   i32 x, y;
