@@ -151,6 +151,24 @@ void memfree(void *old_ptr) {
   ctx->allocator(Alloc_Op::FREE, 0, ctx->allocator_data, old_ptr, 0);
 }
 
+void *scratch_alloc(Mem_Size size, Mem_Size align = 4*8) {
+  void *result = scratch_allocator(Alloc_Op::ALLOC, size, nullptr, nullptr, align);
+  return result;
+}
+
+Mem_Size scratch_get_mark() {
+  Mem_Size result = get_context()->scratch->size;
+  return result;
+}
+
+void scratch_set_mark(Mem_Size mark) {
+  get_context()->scratch->size = mark;
+}
+
+void scratch_reset() {
+  get_context()->scratch->size = 0;
+}
+
 Context *__push_blank_context() {
   assert(__global_context_count < array_count(__global_context_stack));
 

@@ -28,8 +28,12 @@ typedef u64 Mem_Size;
 #define gigabytes(n) (1024LL*megabytes(n))
 
 
-#define PI32 3.14159265358979323846f
+#define I8_MAX 0x7F
+#define I8_MIN 0xFF
 
+#define PI32 3.14159265358979323846f
+#define I32_MAX 0x7FFFFFFF
+#define I32_MIN 0xFFFFFFFF
 
 
 

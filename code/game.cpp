@@ -59,12 +59,70 @@ union Pixel {
   };
 };
 
+Pixel pixel_u32(u8 r, u8 g, u8 b, u8 a) {
+  Pixel result = {
+    .r = r,
+    .g = g,
+    .b = b,
+    .a = a,
+  };
+  return result;
+}
+
 struct Bitmap {
   i32 width;
   i32 height;
   i32 pitch;
   Pixel *data;
 };
+
+Bitmap make_empty_bitmap(i32 width, i32 height) {
+  Bitmap result = {
+    .width = width,
+    .height = height,
+    .pitch = width,
+    .data = (Pixel *)memalloc(sizeof(Pixel)*(u32)height*(u32)width),
+  };
+  return result;
+}
+
+typedef struct {
+  Bitmap bmp;
+  Rect2i *rects;
+  i32 count;
+} Texture_Atlas;
+
+typedef struct {
+  Texture_Atlas atlas;
+  char first_codepoint;
+  i32 codepoint_count;
+  V2 *origins;
+  
+  i8 *advance;
+  i8 *kerning;
+  i8 line_spacing;
+  i8 line_height;
+  i8 descent;
+} Font;
+
+i32 font_get_char(Font *font, char c) {
+  assert(c >= font->first_codepoint && c <= font->first_codepoint + font->codepoint_count);
+  i32 result = c - font->first_codepoint;
+  return result;
+}
+
+i8 font_get_advance(Font *font, char a, char b) {
+  i32 a_index = font_get_char(font, a);
+  
+  i8 result = font->advance[a_index];
+  if (b >= font->first_codepoint && b <= font->first_codepoint + font->codepoint_count)
+  {
+    i32 b_index = font_get_char(font, b);
+    result += font->kerning[a_index*font->codepoint_count + b_index];
+  }
+  
+  return result;
+}
 
 
 struct Grid_Props {
@@ -266,7 +324,7 @@ void draw_rect_avx(Bitmap screen, V2 p, V2 size, f32 angle, Pixel color, Rect2i 
   }
 }
 
-void draw_bitmap_avx(Bitmap screen, V2 p, V2 size, f32 angle, Bitmap bmp, Rect2i clip_rect) {
+void draw_bitmap_avx(Bitmap screen, V2 p, V2 size, f32 angle, Bitmap bmp, Rect2i clip_rect, Rect2i sprite_rect) {
   Rect2 rect = rect2_center_size(p, size);
 
   Rect2 bitmap_rect = add_radius(rect, {1, 1});
@@ -303,6 +361,11 @@ void draw_bitmap_avx(Bitmap screen, V2 p, V2 size, f32 angle, Bitmap bmp, Rect2i
   V2i paint_size = get_size(paint_rect);
 
   V2 texture_size = v2(bmp.width, bmp.height);
+  if (sprite_rect.max.x || sprite_rect.max.y || sprite_rect.min.x || sprite_rect.min.y) {
+    texture_size = v2(get_size(sprite_rect));
+    bmp.data = bmp.data + bmp.pitch*(sprite_rect.min.y) + (sprite_rect.min.x);
+  }
+
   V2 pixel_scale = rect_size/texture_size;
 
   V2 inverse_axis_length_sqr = 1/sqr(bitmap_rect_size);
@@ -358,10 +421,11 @@ struct Render_Region_Task {
   f32 angle;
   Bitmap bmp;
   Pixel color;
+  Rect2i sprite_rect;
 };
 
 void do_render_bitmap_region_task(Render_Region_Task *task) {
-  draw_bitmap_avx(task->screen, task->p, task->size, task->angle, task->bmp, task->region);
+  draw_bitmap_avx(task->screen, task->p, task->size, task->angle, task->bmp, task->region, task->sprite_rect);
 }
 
 void do_render_rect_region_task(Render_Region_Task *task) {
@@ -782,7 +846,7 @@ void draw_gate_scheme(Thread_Queue *queue, Input input, Bitmap screen, State *st
 globalvar State _state = {};
 globalvar Gate *nand;
 
-void game_update(Bitmap screen, Input input, Thread_Queue *thread_queue) {
+void game_update(Bitmap screen, Input input, Thread_Queue *thread_queue, Font *font) {
   State *state = &_state;
 
 
@@ -804,7 +868,27 @@ void game_update(Bitmap screen, Input input, Thread_Queue *thread_queue) {
   static f32 t = 0;
   t += 0.001f;
   f32 scale = (sinf(t) + 1)*10 + 10;
-  memset(screen.data, (i32)0xFF333333, (size_t)(screen.height*screen.pitch*(i32)sizeof(Pixel)));
+  memset(screen.data, (i32)0xFF333333, (size_t)((u32)screen.height*(u32)screen.pitch*sizeof(Pixel)));
 
-  draw_gate_scheme(thread_queue, input, screen, state, nand);
+  // draw_gate_scheme(thread_queue, input, screen, state, nand);
+  char foo[] = "stop this shit";
+  V2 offset = {};
+  for (u32 char_index = 0; char_index < array_count(foo); char_index++) {
+    char c = foo[char_index];
+    Rect2i letter_rect = font->atlas.rects[c];
+    V2 size = v2(get_size(letter_rect));
+    V2 origin = font->origins[c];
+    draw_bitmap_threaded(thread_queue, {
+      .screen = screen,
+      .p = V2{100, 400} + (offset + size*0.5 + origin),
+      .size = size,
+      .bmp = font->atlas.bmp,
+      .sprite_rect = letter_rect,
+    });
+
+    if (char_index != array_count(foo) - 1) {
+      i8 advance = font_get_advance(font, foo[char_index], foo[char_index+1]);
+      offset.x += (f32)advance;
+    }
+  }
 }
